@@ -1,0 +1,36 @@
+# ==================
+# 1. 通用/系统文件
+# ==================
+.DS_Store
+Thumbs.db
+*.log
+tmp/
+temp/
+
+# ==================
+# 2. 前端 (Node/Vue/React/Ant Design)
+# ==================
+node_modules/
+dist/
+build/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+# 如果您不想提交 vscode 的个人配置，取消下面这行的注释
+# .vscode/
+
+# ==================
+# 3. 后端 (Java/Spring Boot/IDEA)
+# ==================
+target/
+*.class
+.idea/
+*.iml
+.mvn/
+mvnw
+mvnw.cmd
+application-dev.yml
+application-prod.yml
+# 注意：通常我们会提交 application.yml，但忽略包含密码的 dev/prod 配置文件
+# 如果您想全部提交，可以把上面两行删掉
