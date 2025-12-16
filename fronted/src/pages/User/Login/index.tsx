@@ -1,6 +1,6 @@
 import Footer from '@/components/Footer';
 import { getFakeCaptcha } from '@/services/ant-design-pro/login';
-import { userLoginUsingPost as login } from '@/services/bi/userController';
+import { getLoginUserUsingGet, userLoginUsingPost as login, userLoginUsingPost } from '@/services/bi/userController';
 import {
   AlipayCircleOutlined,
   LockOutlined,
@@ -76,13 +76,13 @@ const Login: React.FC = () => {
     };
   });
 
-  const fetchUserInfo = async () => {
-    const userInfo = await initialState?.fetchUserInfo?.();
+  const fetchUserInfo = async () => { //用户登录成功后，获取用户的登录信息
+    const userInfo = await getLoginUserUsingGet();
     if (userInfo) {
       flushSync(() => {
-        setInitialState((s) => ({
+        setInitialState((s) => ({  //全局存储
           ...s,
-          currentUser: userInfo,
+          currentUser: userInfo?.data,  // 修改：提取 data 以匹配 LoginUserVO 类型
         }));
       });
     }
@@ -91,7 +91,7 @@ const Login: React.FC = () => {
   const handleSubmit = async (values: API.UserLoginRequest) => {
     try {
       // 登录
-      const res = await login({
+      const res = await userLoginUsingPost({
         ...values,
       });
       
@@ -135,8 +135,8 @@ const Login: React.FC = () => {
             maxWidth: '75vw',
           }}
           logo={<img alt="logo" src="/logo.svg" />}
-          title="Ant Design"
-          subTitle={'Ant Design 是西湖区最具影响力的 Web 设计规范'}
+          title="智能 BI"
+          subTitle={'智能 BI'}
           initialValues={{
             autoLogin: true,
           }}
@@ -173,7 +173,7 @@ const Login: React.FC = () => {
                   size: 'large',
                   prefix: <UserOutlined />,
                 }}
-                placeholder={'用户名: admin or user'}
+                placeholder={'用户名: cyuyu'}
                 rules={[
                   {
                     required: true,
@@ -188,7 +188,7 @@ const Login: React.FC = () => {
                   size: 'large',
                   prefix: <LockOutlined />,
                 }}
-                placeholder={'密码: ant.design'}
+                placeholder={'密码: 11111111'}
                 rules={[
                   {
                     required: true,
@@ -271,6 +271,9 @@ const Login: React.FC = () => {
             </a>
           </div>
         </LoginForm>
+        <div style={{ textAlign: 'center', marginTop: 16 }}>
+          <a href="/user/register">没有账号？立即注册</a>
+        </div>
       </div>
       <Footer />
     </div>
