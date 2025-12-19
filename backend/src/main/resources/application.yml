@@ -87,3 +87,8 @@ cos:
     secretKey: xxx
     region: xxx
     bucket: xxx
+ai:
+  qianfan:
+    api-key: "sk-b98311dd0ceb4f7ba6a8063d23c90569"
+    url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    model: "qwen-plus"

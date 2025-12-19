@@ -17,10 +17,13 @@ public class UserAddRequest implements Serializable {
      */
     private String userName;
 
+
+    private String userAccount;
+
     /**
      * 账号
      */
-    private String userAccount;
+
 
     /**
      * 用户头像

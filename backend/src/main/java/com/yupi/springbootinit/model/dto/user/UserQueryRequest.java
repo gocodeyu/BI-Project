@@ -19,6 +19,9 @@ public class UserQueryRequest extends PageRequest implements Serializable {
      */
     private Long id;
 
+
+    private String userAccount;
+
     /**
      * 开放平台id
      */

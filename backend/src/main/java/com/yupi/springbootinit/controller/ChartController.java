@@ -1,5 +1,6 @@
 package com.yupi.springbootinit.controller;
 
+import cn.hutool.core.io.FileUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
@@ -13,12 +14,14 @@ import com.yupi.springbootinit.constant.FileConstant;
 import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.exception.ThrowUtils;
+import com.yupi.springbootinit.manager.AiManager;
 import com.yupi.springbootinit.manager.CosManager;
 import com.yupi.springbootinit.model.dto.chart.*;
 import com.yupi.springbootinit.model.dto.file.UploadFileRequest;
 import com.yupi.springbootinit.model.entity.Chart;
 import com.yupi.springbootinit.model.entity.User;
 import com.yupi.springbootinit.model.enums.FileUploadBizEnum;
+import com.yupi.springbootinit.model.vo.BiResponse;
 import com.yupi.springbootinit.service.ChartService;
 import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
@@ -35,6 +38,7 @@ import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -56,6 +60,9 @@ public class ChartController {
 
     @Resource
     private UserService userService;
+
+    @Resource
+    private AiManager aiManager;
 
     private final static Gson GSON = new Gson();
 
@@ -250,34 +257,96 @@ public class ChartController {
         return queryWrapper;
     }
 
-    /**
-     * 文件上传获得AI智能分析的图表
-     *
-     * @param multipartFile
-     * @param genChartByAiRequest
-     * @param request
-     * @return
-     */
-    @PostMapping("/gen")
-    public BaseResponse<String> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
-                                             GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws FileNotFoundException {
-        String name = genChartByAiRequest.getName();
-        String goal = genChartByAiRequest.getGoal();
-        String chartType = genChartByAiRequest.getChartType();
-        //校验
-        if (StringUtils.isBlank(goal)) {
-            ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "请输入分析目标");
+        /**
+         * 智能分析（同步模式）
+         *
+         * @param multipartFile
+         * @param genChartByAiRequest
+         * @param request
+         * @return
+         */
+        @PostMapping("/gen")
+        public BaseResponse<BiResponse> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
+                                                     GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws FileNotFoundException {
+            String name = genChartByAiRequest.getName();
+            String goal = genChartByAiRequest.getGoal();
+            String chartType = genChartByAiRequest.getChartType();
+            User loginUser = userService.getLoginUser(request);
+
+            // 1. 校验
+            ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "分析目标为空");
+            ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
+            // 校验文件
+            long size = multipartFile.getSize();
+            String originalFilename = multipartFile.getOriginalFilename();
+            // 校验文件大小 (例如 1MB)
+            final long ONE_MB = 1024 * 1024L;
+            ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1MB");
+            // 校验文件后缀
+            String suffix = FileUtil.getSuffix(originalFilename);
+            final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
+            ThrowUtils.throwIf(!validFileSuffixList.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
+
+            // 2. 构造 Prompt
+            // 系统预设：负责定义 AI 的身份和输出格式
+            StringBuilder systemPrompt = new StringBuilder();
+            systemPrompt.append("你是一个高级数据分析师和前端开发专家。接下来我会给你提供分析目标和原始数据。\n");
+            systemPrompt.append("请严格按照以下格式输出内容，不要包含任何多余的开场白或结束语：\n");
+            systemPrompt.append("【【【【【\n");
+            systemPrompt.append("{这里填写前端 Echarts V5 的 option 配置对象 JSON 代码，不要加 ```json 代码块包裹，直接返回 JSON 内容，确保属性名使用双引号}\n");
+            systemPrompt.append("【【【【【\n");
+            systemPrompt.append("{这里填写明确的数据分析结论，越详细越好}\n");
+
+            // 用户输入：负责提供具体数据
+            StringBuilder userMessage = new StringBuilder();
+            userMessage.append("分析目标：").append(goal);
+            if (StringUtils.isNotBlank(chartType)) {
+                userMessage.append("，请使用").append(chartType);
+            }
+            userMessage.append("\n");
+
+            // 读取 Excel 数据并转为 CSV
+            ExcelUtils excelUtils = new ExcelUtils();
+
+            String csvData = excelUtils.excelTocsv(multipartFile);
+            userMessage.append("原始数据：\n").append(csvData);
+
+            // 3. 调用 AI
+            // 使用新的 doChat 方法，传入 system prompt 和 user message
+            String result = aiManager.doChat(systemPrompt.toString(), userMessage.toString());
+
+            // 4. 解析结果
+            String[] splits = result.split("【【【【【");
+            if (splits.length < 3) {
+                log.error("AI 生成格式错误，返回内容：{}", result);
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成格式异常，请稍后重试");
+            }
+
+            String genChart = splits[1].trim();
+            String genResult = splits[2].trim();
+
+            // 清理一下可能的 Markdown 代码块标记 (兼容性处理)
+            genChart = genChart.replace("```json", "").replace("```", "").trim();
+
+            // 5. 保存到数据库
+            Chart chart = new Chart();
+            chart.setName(name);
+            chart.setGoal(goal);
+            chart.setChartData(csvData);
+            chart.setChartType(chartType);
+            chart.setGenChart(genChart);
+            chart.setGenResult(genResult);
+            chart.setUserId(loginUser.getId());
+            boolean saveResult = chartService.save(chart);
+            ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+
+            // 6. 返回结果
+            BiResponse biResponse = new BiResponse();
+            biResponse.setGenChart(genChart);
+            biResponse.setGenResult(genResult);
+            biResponse.setChartId(chart.getId());
+            return ResultUtils.success(biResponse);
         }
-        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
-
-        //数据压缩
-       String res=ExcelUtils.excelTocsv(multipartFile);
-       StringBuilder input=new StringBuilder();
-       input.append("你是一名数据分析师，接下来我给你分析目标和数据，请你返回给我数据分析结果").append('\n');
-       input.append("分析目标:").append( goal).append('\n');
-       input.append("数据:").append(res);
-        return ResultUtils.success(input.toString());
-
     }
 
-}
+
