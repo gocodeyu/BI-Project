@@ -93,12 +93,14 @@ declare namespace API {
     chartData?: string;
     chartType?: string;
     createTime?: string;
+    execMessage?: string;
     genChart?: string;
     genResult?: string;
     goal?: string;
     id?: number;
     isDelete?: number;
     name?: string;
+    status?: string;
     updateTime?: string;
     userId?: number;
   };
@@ -147,6 +149,12 @@ declare namespace API {
     id?: number;
   };
 
+  type genChartByAiAsyncUsingPOSTParams = {
+    chartType?: string;
+    goal?: string;
+    name?: string;
+  };
+
   type genChartByAiUsingPOSTParams = {
     chartType?: string;
     goal?: string;
@@ -176,7 +184,9 @@ declare namespace API {
   type LoginUserVO = {
     createTime?: string;
     id?: number;
+    leftNum?: number;
     updateTime?: string;
+    userAccount?: string;
     userAvatar?: string;
     userName?: string;
     userProfile?: string;
@@ -344,6 +354,7 @@ declare namespace API {
     sortField?: string;
     sortOrder?: string;
     unionId?: string;
+    userAccount?: string;
     userName?: string;
     userProfile?: string;
     userRole?: string;
@@ -356,6 +367,7 @@ declare namespace API {
   };
 
   type UserUpdateMyRequest = {
+    userAccount?: string;
     userAvatar?: string;
     userName?: string;
     userProfile?: string;
@@ -363,6 +375,7 @@ declare namespace API {
 
   type UserUpdateRequest = {
     id?: number;
+    userAccount?: string;
     userAvatar?: string;
     userName?: string;
     userProfile?: string;

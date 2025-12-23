@@ -69,6 +69,16 @@ public class Chart implements Serializable {
     @TableLogic
     private Integer isDelete;
 
+    /**
+     * 图表状态
+     */
+    private String status;
+
+    /**
+     * 错误信息
+     */
+    private String execMessage;
+
     @TableField(exist = false)
     private static final long serialVersionUID = 1L;
 }

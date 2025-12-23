@@ -23,12 +23,12 @@ spring:
     password: 111111
   # Redis 配置
   # todo 需替换配置，然后取消注释
-#  redis:
-#    database: 1
-#    host: localhost
-#    port: 6379
-#    timeout: 5000
-#    password: 111111
+  redis:
+    database: 1
+    host: 192.168.81.131
+    port: 6379
+    timeout: 5000
+    password: 111111
   # Elasticsearch 配置
   # todo 需替换配置，然后取消注释
 #  elasticsearch:

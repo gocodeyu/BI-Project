@@ -23,4 +23,46 @@
         chartType,genChart,genResult,userId,
         createTime,updateTime,isDelete
     </sql>
+
+    <update id="createChartTable">
+        CREATE TABLE ${tableName}
+        (
+        `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键',
+        <foreach collection="colNames" item="col" separator=",">
+            `${col}` TEXT NULL
+        </foreach>,
+        PRIMARY KEY (`id`)
+        ) COMMENT '用户上传数据分表' COLLATE = utf8mb4_unicode_ci;
+    </update>
+
+
+    <insert id="insertChartData">
+        INSERT INTO ${tableName}
+        <foreach collection="colNames" item="col" open="(" separator="," close=")">
+            `${col}`
+        </foreach>
+        VALUES
+        <foreach collection="dataList" item="row" separator=",">
+            (
+            <foreach collection="row" item="val" separator=",">
+                #{val}
+            </foreach>
+            )
+        </foreach>
+    </insert>
+
+    <select id="queryChartData" resultType="java.util.LinkedHashMap">
+        SELECT * FROM ${tableName}
+    </select>
+
+
+    <select id="queryChartDataByColNames" resultType="java.util.Map">
+        select
+        <foreach collection="colNames" item="col" separator=",">
+            ${col}
+        </foreach>
+        from ${tableName}
+    </select>
+
+
 </mapper>

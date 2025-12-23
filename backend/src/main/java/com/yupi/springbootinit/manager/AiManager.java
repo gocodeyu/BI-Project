@@ -31,7 +31,7 @@ public class AiManager {
     private String model;
 
     /**
-     * 发送请求到千帆大模型（OpenAI 兼容接口）
+     * 发送请求到阿里大模型（OpenAI 兼容接口）
      *
      * @param systemPrompt 系统预设（指定AI的角色和输出格式）
      * @param userMessage  用户具体内容

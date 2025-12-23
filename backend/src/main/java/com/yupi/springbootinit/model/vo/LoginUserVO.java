@@ -50,5 +50,10 @@ public class LoginUserVO implements Serializable {
      */
     private Date updateTime;
 
+    /**
+     * 剩余次数
+     */
+    private Long leftNum;
+
     private static final long serialVersionUID = 1L;
 }

@@ -10,6 +10,7 @@ import com.yupi.springbootinit.config.WxOpenConfig;
 import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.exception.ThrowUtils;
+import com.yupi.springbootinit.manager.RedisLimiterManager;
 import com.yupi.springbootinit.model.dto.user.UserAddRequest;
 import com.yupi.springbootinit.model.dto.user.UserLoginRequest;
 import com.yupi.springbootinit.model.dto.user.UserQueryRequest;
@@ -21,6 +22,7 @@ import com.yupi.springbootinit.model.vo.LoginUserVO;
 import com.yupi.springbootinit.model.vo.UserVO;
 import com.yupi.springbootinit.service.UserService;
 import java.util.List;
+import java.util.Map;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -48,6 +50,9 @@ public class UserController {
 
     @Resource
     private WxOpenConfig wxOpenConfig;
+
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
 
     // region 登录相关
 
@@ -117,7 +122,41 @@ public class UserController {
     @GetMapping("/get/login")
     public BaseResponse<LoginUserVO> getLoginUser(HttpServletRequest request) {
         User user = userService.getLoginUser(request);
-        return ResultUtils.success(userService.getLoginUserVO(user));
+        LoginUserVO loginUserVO = userService.getLoginUserVO(user);
+        long leftNum = redisLimiterManager.getRemainingPermits(user.getId(), user.getUserRole());
+        loginUserVO.setLeftNum(leftNum);
+        return ResultUtils.success(loginUserVO);
+    }
+
+    /**
+     * 用户兑换会员（简单模拟）
+     * @Param request
+     * @return
+     */
+    @PostMapping("/exchange/vip")
+    public BaseResponse<Boolean> exchangeVip(@RequestBody Map<String,String> payload, HttpServletRequest request){
+        // 这里简单模拟：前端传一个 "vipCode" = "vip" 就能升级
+        // 实际开发中应该是支付成功后回调
+        String vipCode = payload.get("vipCode");
+        if (!"vip".equals(vipCode)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "兑换码错误");
+        }
+        User loginUser = userService.getLoginUser(request);
+        User user = new User();
+        user.setId(loginUser.getId());
+        if(loginUser.getUserRole().equals("vip")){
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "已经是会员");
+        }
+        user.setUserRole("vip"); // 变更为 vip
+        boolean result = userService.updateById(user);
+        if (!result) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "升级失败");
+        }
+        //删除当前用户的限流key，再新建一个限流key
+        redisLimiterManager.deleteUserRateLimit(loginUser.getId(), loginUser.getUserRole());
+        request.getSession().setAttribute(UserConstant.USER_LOGIN_STATE, user);
+        return ResultUtils.success(result);
+
     }
 
     // endregion
