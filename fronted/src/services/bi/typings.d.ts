@@ -132,6 +132,10 @@ declare namespace API {
     userId?: number;
   };
 
+  type ChartReloadRequest = {
+    id?: number;
+  };
+
   type ChartUpdateRequest = {
     chartData?: string;
     chartType?: string;

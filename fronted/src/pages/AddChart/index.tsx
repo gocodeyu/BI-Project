@@ -3,8 +3,9 @@ import {
   genChartByAiUsingPost,
   genChartByAiAsyncUsingPost,
   listMyChartByPageUsingPost,
-  editChartUsingPost, // 引用更新后的接口
-  getChartByIdUsingGet
+  editChartUsingPost,
+  getChartByIdUsingGet,
+  retryChartUsingPost
 } from '@/services/bi/chartController';
 import { 
   userLogoutUsingPost, 
@@ -46,7 +47,9 @@ import {
   CrownOutlined,
   PayCircleOutlined,
   ClockCircleOutlined,
-  CloseCircleOutlined
+  CloseCircleOutlined,
+  ReloadOutlined,
+  QuestionCircleOutlined 
 } from '@ant-design/icons';
 import {
   Avatar,
@@ -91,6 +94,7 @@ const { Text, Title, Paragraph } = Typography;
 
 // --- 1. 扩展的图表类型配置 ---
 const CHART_TYPE_MAP: Record<string, { color: string; icon: React.ReactNode }> = {
+  '不指定': { color: 'default', icon: <QuestionCircleOutlined /> },
   '折线图': { color: 'blue', icon: <LineChartOutlined /> },
   '柱状图': { color: 'cyan', icon: <BarChartOutlined /> },
   '饼图': { color: 'orange', icon: <PieChartOutlined /> },
@@ -206,11 +210,13 @@ const AddChart: React.FC = () => {
   // --- 状态定义 ---
   const [chartList, setChartList] = useState<API.Chart[]>([]);
   const [listLoading, setListLoading] = useState<boolean>(true);
+  
+  // [修改] 默认按 updateTime 倒序排序，保证新建/修改的在最前
   const [searchParams, setSearchParams] = useState<API.ChartQueryRequest>({
     current: 1,
     pageSize: 10,
-    sortField: 'createTime',
-    sortOrder: 'desc',
+    sortField: 'updateTime', // <--- 改为 updateTime
+    sortOrder: 'desc',       // <--- 保持 desc
     name: '',
     chartType: ''
   });
@@ -375,7 +381,6 @@ const AddChart: React.FC = () => {
     setEditModalOpen(true);
   };
 
-  // 【核心修改】适配异步 edit 接口
   const handleEditSubmit = async (values: any) => {
     if (!editingChart?.id) return;
     setEditLoading(true);
@@ -385,20 +390,17 @@ const AddChart: React.FC = () => {
         ...values
       });
       
-      // 注意：接口现在返回的是 BaseResponse<BiResponse>
-      // res.data 存在即表示成功
       if (res.data) {
-        // 使用后端返回的消息，或者默认消息
         const successMsg = res.data.genResult || '更新已提交，系统处理中...';
         message.success(successMsg);
         
         setEditModalOpen(false);
         
-        // 触发列表刷新。后端此时状态应该是 WAIT，会触发自动轮询
-        loadData(); 
+        // [修改] 更新成功后，重置回第一页，确保用户能看到置顶的修改项
+        setSearchParams({ ...searchParams, current: 1 });
+        
         fetchUserInfo();
         
-        // 如果当前正好选中该图表，清空展示，避免用户看到旧图表产生困惑
         if (selectedChart?.id === editingChart.id) {
            setSelectedChart(undefined);
            setOption(undefined);
@@ -410,6 +412,22 @@ const AddChart: React.FC = () => {
       message.error('更新失败：' + e.message);
     } finally {
       setEditLoading(false);
+    }
+  };
+
+  const handleRetry = async (chartId: number, e: React.MouseEvent) => {
+    e.stopPropagation(); 
+    try {
+      const res = await retryChartUsingPost({ id: chartId });
+      if (res.data) {
+        message.success('已重新加入生成队列');
+        loadData();      
+        fetchUserInfo(); 
+      } else {
+        message.error('重试提交失败');
+      }
+    } catch (e: any) {
+      message.error('重试失败：' + e.message);
     }
   };
 
@@ -538,6 +556,7 @@ const AddChart: React.FC = () => {
       } else {
         message.success('分析任务已提交，系统正在处理中...');
         form.resetFields();
+        // [修改] 提交成功后，重置回第一页，显示最新创建的图表
         setSearchParams({ ...searchParams, current: 1 });
         fetchUserInfo();
       }
@@ -755,7 +774,7 @@ const AddChart: React.FC = () => {
                             return;
                         }
                         if (item.status === 'failed') {
-                            message.error('生成失败：' + (item.execMessage || '未知错误'));
+                            // 失败时也允许查看详情，方便重试
                             setSelectedChart(item);
                             setOption(undefined);
                             return;
@@ -811,8 +830,28 @@ const AddChart: React.FC = () => {
                              <div style={{ marginBottom: 4 }}>
                                 {item.status === 'wait' && <Tag icon={<ClockCircleOutlined />} color="default">排队中</Tag>}
                                 {item.status === 'running' && <Tag icon={<LoadingOutlined />} color="processing">生成中</Tag>}
-                                {item.status === 'failed' && <Tag icon={<CloseCircleOutlined />} color="error">失败</Tag>}
                                 {item.status === 'succeed' && <Tag color="success">成功</Tag>}
+                                
+                                {/* 【确保】失败状态：展示详细错误信息 + 重试按钮 */}
+                                {item.status === 'failed' && (
+                                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#ff4d4f', fontSize: 12, marginTop: 4 }}>
+                                      <CloseCircleOutlined />
+                                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.execMessage}>
+                                         {item.execMessage || '生成失败'}
+                                      </span>
+                                      <Button 
+                                        type="primary" 
+                                        danger 
+                                        size="small" 
+                                        ghost
+                                        icon={<ReloadOutlined style={{ fontSize: 12 }} />}
+                                        onClick={(e) => handleRetry(item.id, e)}
+                                        style={{ fontSize: 12, height: 22, padding: '0 8px' }}
+                                      >
+                                        重试
+                                      </Button>
+                                   </div>
+                                )}
                              </div>
 
                              {item.goal && (
@@ -863,7 +902,7 @@ const AddChart: React.FC = () => {
 
                <Card bordered={false}>
                   <Spin spinning={submitting} tip="正在提交任务...">
-                    <Form form={form} name="addChart" layout="vertical" onFinish={onFinish} initialValues={{ chartType: '折线图' }}>
+                    <Form form={form} name="addChart" layout="vertical" onFinish={onFinish} initialValues={{ chartType: '不指定' }}>
                       <Form.Item name="goal" label="分析目标" rules={[{ required: true, message: '请输入分析目标' }]}>
                         <Input.TextArea placeholder="例如：分析网站用户增长趋势..." autoSize={{ minRows: 3, maxRows: 6 }} showCount maxLength={200} />
                       </Form.Item>
@@ -913,7 +952,13 @@ const AddChart: React.FC = () => {
                     title="图表生成失败"
                     subTitle={selectedChart.execMessage}
                     extra={[
-                        <Button type="primary" key="retry" onClick={handleRegenerate}>
+                        // [新增] 详情页也可以加个重试按钮
+                        <Button 
+                           type="primary" 
+                           key="retry" 
+                           danger
+                           onClick={(e) => handleRetry(selectedChart.id, e)}
+                        >
                             尝试重新生成
                         </Button>,
                         <Button key="close" onClick={() => setSelectedChart(undefined)}>
@@ -1157,6 +1202,7 @@ const AddChart: React.FC = () => {
             >
                 立即开通
             </Button>
+            
         </div>
       </Modal>
     </Layout>

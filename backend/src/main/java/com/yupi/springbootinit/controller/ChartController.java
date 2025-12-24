@@ -27,6 +27,7 @@ import com.yupi.springbootinit.model.entity.User;
 import com.yupi.springbootinit.model.enums.FileUploadBizEnum;
 import com.yupi.springbootinit.model.enums.GenChartStatusEnum;
 import com.yupi.springbootinit.model.vo.BiResponse;
+import com.yupi.springbootinit.service.BiAsyncService;
 import com.yupi.springbootinit.service.ChartService;
 import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
@@ -60,6 +61,8 @@ import java.util.concurrent.CompletableFuture;
 @RequestMapping("/chart")
 @Slf4j
 public class ChartController {
+    @Resource
+    private BiAsyncService biAsyncService;
     @Resource
     private ThreadPoolExecutor threadPoolExecutor;
 
@@ -218,7 +221,51 @@ public class ChartController {
         return ResultUtils.success(chartPage);
     }
 
-    // endregion
+    /**
+     * 对于fail的状态重试
+     */
+    @PostMapping("/gen/retry")
+    public BaseResponse<Boolean> retryChart(@RequestBody ChartReloadRequest reloadRequest, HttpServletRequest request) {
+        if (reloadRequest == null || reloadRequest.getId() <= 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        User loginUser = userService.getLoginUser(request);
+        long chartId = reloadRequest.getId();
+
+        // 1. 校验图表是否存在
+        Chart chart = chartService.getById(chartId);
+        ThrowUtils.throwIf(chart == null, ErrorCode.NOT_FOUND_ERROR);
+        // 2. 校验权限（仅本人或管理员可重试）
+        if (!chart.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
+        }
+        // 3. 限流校验
+        redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
+        redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
+
+        //4. 更新表格状态
+        Chart updateChart = new Chart();
+        updateChart.setId(chartId);
+        updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
+        updateChart.setExecMessage("");
+        boolean update = chartService.updateById(updateChart);
+        if(!update){
+            log.error("更新图表状态失败, chartId: {}", chartId);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR);
+        }
+        //5. 异步提交任务
+        try{
+            CompletableFuture.runAsync(() -> {
+                biAsyncService.executeGenChart(chartId);
+            }, threadPoolExecutor);
+        }catch (Exception e){
+            log.error("提交任务失败, chartId: {}", chartId, e);
+            handleChartUpdateError(chartId, "系统繁忙，重试提交失败");
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统繁忙，请稍后再试");
+        }
+
+        return ResultUtils.success(true);
+    }
 
     /**
      * 编辑（用户）
@@ -292,45 +339,13 @@ public class ChartController {
         // 5. 开启异步任务
         try {
             CompletableFuture.runAsync(() -> {
-                // [Step 1] 更新状态为 RUNNING
-                Chart updateChartRunning = new Chart();
-                updateChartRunning.setId(id);
-                updateChartRunning.setStatus(GenChartStatusEnum.RUNNING.getValue());
-                boolean b = chartService.updateById(updateChartRunning);
-                if (!b) {
-                    handleChartUpdateError(id, "更新图表执行中状态失败");
-                    return;
-                }
+                /*
+                biAsyncService.executeGenChart(id) 本身只是一个普通的 Java 方法调用。
 
-                try {
-                    // [Step 2] 调用 AI
-                    String result = aiPrompt.func(newGoal, newChartType, csvData);
-
-                    // [Step 3] 解析结果
-                    String[] splits = result.split("【【【【【");
-                    if (splits.length < 3) {
-                        throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成格式异常，请稍后重试");
-                    }
-                    String genChart = splits[1].trim().replace("```json", "").replace("```", "").trim();
-                    String genResult = splits[2].trim();
-
-                    // [Step 4] 更新数据库：数据 + 状态 SUCCEED
-                    Chart updateChartSuccess = new Chart();
-                    updateChartSuccess.setId(id);
-                    updateChartSuccess.setGenChart(genChart);
-                    updateChartSuccess.setGenResult(genResult);
-                    updateChartSuccess.setStatus(GenChartStatusEnum.SUCCEED.getValue());
-
-                    boolean res = chartService.updateById(updateChartSuccess);
-                    if (!res) {
-                        handleChartUpdateError(id, "更新图表成功状态失败");
-                        throw new BusinessException(ErrorCode.SYSTEM_ERROR, "更新图表失败");
-                    }
-                } catch (Exception e) {
-                    log.error("AI生成异步任务失败, chartId: {}", id, e);
-                    handleChartUpdateError(id, "AI生成失败: " + e.getMessage());
-                }
-
+外层的 CompletableFuture.runAsync 是为了把这个耗时的方法调用从 Tomcat 的 HTTP 响应线程中剥离出来，
+扔到后台去跑，从而实现**“接口立即响应，任务后台处理”**的效果。
+                 */
+                biAsyncService.executeGenChart(id);
             }, threadPoolExecutor);
 
         } catch (Exception e) {
@@ -370,6 +385,12 @@ public class ChartController {
         queryWrapper.eq(StringUtils.isNotBlank(chartType), "chartType", chartType);
         queryWrapper.eq(ObjectUtils.isNotEmpty(userId), "userId", userId);
         queryWrapper.eq("isDelete", false);
+        // [修改] 设置默认排序：如果没有指定排序字段，则默认按 updateTime 倒序
+        // 这样可以保证最新修改或创建的图表排在最前面
+        if (StringUtils.isBlank(sortField)) {
+            sortField = "updateTime";
+            sortOrder = CommonConstant.SORT_ORDER_DESC;
+        }
         queryWrapper.orderBy(SqlUtils.validSortField(sortField), sortOrder.equals(CommonConstant.SORT_ORDER_ASC),
                 sortField);
         return queryWrapper;
@@ -413,9 +434,6 @@ public class ChartController {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
         }
 
-        // 转换为 CSV 字符串（给 AI 用）
-        String csvData = ExcelUtils.convertListToCsv(rawDataList);
-
         List<String> headers = ExcelUtils.getHeaders(rawDataList);
         //数据清洗：处理表头
         // 防止表头为空或包含特殊字符导致建表失败
@@ -440,63 +458,33 @@ public class ChartController {
         chart.setUserId(loginUser.getId());
         chart.setStatus(GenChartStatusEnum.WAIT.getValue());
         boolean saveResult = chartService.save(chart);
-        ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "保存图表失败");
+        if(!saveResult){
+            log.error("保存图表失败");
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "保存图表失败");
+
+        }
+
         long chartId = chart.getId();
+        String tableName = "chart_" + chartId;
+        chartMapper.createChartTable(tableName, headers);
+        if (CollUtil.isNotEmpty(dataRows)) {
+            int batchSize = 1000;
+            for (int i = 0; i < dataRows.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, dataRows.size());
+                chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
+            }
+        }
 
         // 4. 请求任务保存到线程池中
         try {
             CompletableFuture.runAsync(() -> {
-                //A. 更新图表状态
-                Chart updateChart = new Chart();
-                updateChart.setId(chartId);
-                updateChart.setStatus(GenChartStatusEnum.RUNNING.getValue());
-                boolean updateResult = chartService.updateById(updateChart);
-                ThrowUtils.throwIf(!updateResult, ErrorCode.SYSTEM_ERROR, "更新图表失败");
-                try {
-                    // B. 动态分表 & 插入数据
-                    String tableName = "chart_" + chartId;
-                    chartMapper.createChartTable(tableName, headers);
-                    if (CollUtil.isNotEmpty(dataRows)) {
-                        int batchSize = 1000;
-                        for (int i = 0; i < dataRows.size(); i += batchSize) {
-                            int end = Math.min(i + batchSize, dataRows.size());
-                            chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
-                        }
-                    }
-                    //C.调用AI
-                    // 使用新的 doChat 方法，传入 system prompt 和 user message
-                    String result = aiPrompt.func(goal,chartType,csvData);
-                    // D.解析结果
-                    String[] splits = result.split("【【【【【");
-                    if (splits.length < 3) {
-                        log.error("AI 生成格式错误，返回内容：{}", result);
-                        throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成格式异常，请稍后重试");
-                    }
-
-                    String genChart = splits[1].trim();
-                    String genResult = splits[2].trim();
-
-                    // 清理一下可能的 Markdown 代码块标记 (兼容性处理)
-                    genChart = genChart.replace("```json", "").replace("```", "").trim();
-                    //E.更新数据表状态
-                    Chart updateChart1 = new Chart();
-                    updateChart1.setId(chartId);
-                    updateChart1.setStatus(GenChartStatusEnum.SUCCEED.getValue());
-                    updateChart1.setGenChart(genChart);
-                    updateChart1.setGenResult(genResult);
-                    boolean updateResult1 = chartService.updateById(updateChart1);
-                    ThrowUtils.throwIf(!updateResult1, ErrorCode.SYSTEM_ERROR, "更新图表失败");
-
-                }catch (Exception e){
-                    log.error("图表生成异步任务失败, chartId: " + chartId, e);
-                    handleChartUpdateError(chartId, "执行失败: " + e.getMessage());
-                }
+               biAsyncService.executeGenChart(chartId);
             }, threadPoolExecutor);
         } catch (Exception e) {
             // 如果提交任务到线程池就失败了（例如队列满了 RejectedExecutionException）
-            log.error("提交分析任务失败", e);
-            handleChartUpdateError(chartId, "系统繁忙，请稍后再试");
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统繁忙，分析任务提交失败");
+            log.error("提交分析任务失败，队列已满: {}", e.getMessage());
+            // 优化点2配套：标记为"系统繁忙"，方便定时任务捞起来重试
+            handleChartUpdateError(chartId, "系统繁忙，请稍后再试（任务已加入重试队列）");
         }
         //5、立即返回给前端信息，不等AI分析结束
         BiResponse biResponse = new BiResponse();
