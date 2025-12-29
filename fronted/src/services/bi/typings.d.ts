@@ -17,6 +17,12 @@ declare namespace API {
     message?: string;
   };
 
+  type BaseResponseChartDataPreviewResponse_ = {
+    code?: number;
+    data?: ChartDataPreviewResponse;
+    message?: string;
+  };
+
   type BaseResponseInt_ = {
     code?: number;
     data?: number;
@@ -112,6 +118,12 @@ declare namespace API {
     name?: string;
   };
 
+  type ChartDataPreviewResponse = {
+    data?: string[][];
+    headers?: string[];
+    total?: number;
+  };
+
   type ChartEditRequest = {
     chartData?: string;
     chartType?: string;
@@ -134,18 +146,6 @@ declare namespace API {
 
   type ChartReloadRequest = {
     id?: number;
-  };
-
-  type ChartDataPreviewRequest = {
-    chartId?: number;
-    current?: number;
-    pageSize?: number;
-  };
-
-  type ChartDataPreviewResponse = {
-    headers?: string[];
-    data?: string[][];
-    total?: number;
   };
 
   type ChartUpdateRequest = {
@@ -344,6 +344,12 @@ declare namespace API {
     updateTime?: string;
     user?: UserVO;
     userId?: number;
+  };
+
+  type previewChartDataUsingGETParams = {
+    chartId?: number;
+    current?: number;
+    pageSize?: number;
   };
 
   type uploadFileUsingPOSTParams = {

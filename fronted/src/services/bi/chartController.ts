@@ -17,6 +17,21 @@ export async function addChartUsingPost(
   });
 }
 
+/** previewChartData GET /api/chart/data/preview */
+export async function previewChartDataUsingGet(
+  // 叠加生成的Param类型 (非body参数swagger默认没有生成对象)
+  params: API.previewChartDataUsingGETParams,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseChartDataPreviewResponse_>('/api/chart/data/preview', {
+    method: 'GET',
+    params: {
+      ...params,
+    },
+    ...(options || {}),
+  });
+}
+
 /** deleteChart POST /api/chart/delete */
 export async function deleteChartUsingPost(
   body: API.DeleteRequest,
@@ -301,18 +316,6 @@ export async function recoverChartUsingPost(
       'Content-Type': 'application/json',
     },
     data: body,
-    ...(options || {}),
-  });
-}
-
-/** getChartDataPreview GET /chart/data/preview */
-export async function getChartDataPreviewUsingGet(
-  params: API.ChartDataPreviewRequest,
-  options?: { [key: string]: any },
-) {
-  return request<API.ChartDataPreviewResponse>('/chart/data/preview', {
-    method: 'GET',
-    params,
     ...(options || {}),
   });
 }

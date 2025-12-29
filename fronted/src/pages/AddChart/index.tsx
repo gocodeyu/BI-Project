@@ -2,7 +2,7 @@ import {
   deleteChartUsingPost,
   editChartRabbitmqUsingPost, // RabbitMQ 编辑
   genChartByAiAsyncRabbitmqUsingPost, // RabbitMQ 生成
-  getChartDataPreviewUsingGet,
+  previewChartDataUsingGet, // 预览接口
   listMyChartByPageUsingPost,
   retryChartRabbitmqUsingPost, // RabbitMQ 重试
 } from '@/services/bi/chartController';
@@ -27,6 +27,7 @@ import {
   DotChartOutlined,
   DownloadOutlined,
   EditOutlined,
+  EyeOutlined,
   FileTextOutlined,
   FundOutlined,
   FunnelPlotOutlined,
@@ -47,6 +48,7 @@ import {
   ReloadOutlined,
   SettingOutlined,
   SlidersOutlined,
+  TableOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import { history, useModel } from '@umijs/max';
@@ -74,6 +76,7 @@ import {
   Skeleton,
   Space,
   Spin,
+  Table,
   Tabs,
   Tag,
   theme,
@@ -87,8 +90,8 @@ import copy from 'copy-to-clipboard';
 import ReactECharts from 'echarts-for-react';
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Resizable } from 're-resizable'; // [新增] 引入拖拽组件
-
+import { Resizable } from 're-resizable';
+import * as XLSX from 'xlsx';
 
 const { Sider, Content, Header } = Layout;
 const { Text, Title, Paragraph } = Typography;
@@ -221,9 +224,9 @@ const AddChart: React.FC = () => {
   const [option, setOption] = useState<any>();
   const [submitting, setSubmitting] = useState<boolean>(false);
 
-  // [修改] 侧边栏状态
+  // 侧边栏状态
   const [collapsed, setCollapsed] = useState(false);
-  const [siderWidth, setSiderWidth] = useState(300); // 侧边栏宽度状态
+  const [siderWidth, setSiderWidth] = useState(300);
 
   // 用户弹窗状态
   const [userModalOpen, setUserModalOpen] = useState(false);
@@ -243,10 +246,15 @@ const AddChart: React.FC = () => {
   const [vipCode, setVipCode] = useState('');
   const [vipLoading, setVipLoading] = useState(false);
 
-  // 数据预览弹窗状态
+  // 数据预览相关状态
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
-  const [previewChartId, setPreviewChartId] = useState<number | undefined>();
-  const [previewChartName, setPreviewChartName] = useState<string>('');
+  const [previewData, setPreviewData] = useState<any[]>([]);
+  const [previewColumns, setPreviewColumns] = useState<any[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [isServerPreview, setIsServerPreview] = useState(false);
+  const [previewChartId, setPreviewChartId] = useState<number>();
+  const [previewTotal, setPreviewTotal] = useState(0);
+  const [previewParams, setPreviewParams] = useState({ current: 1, pageSize: 10 });
 
   const normFile = (e: any) => {
     if (Array.isArray(e)) return e;
@@ -309,7 +317,6 @@ const AddChart: React.FC = () => {
     loadData();
   }, [searchParams]);
 
-  // 轮询逻辑
   useEffect(() => {
     const timer = setInterval(() => {
       const hasPendingTask = chartList.some(
@@ -332,6 +339,107 @@ const AddChart: React.FC = () => {
       setAvatarUrl(currentUser.userAvatar);
     }
   }, [userModalOpen, currentUser]);
+
+  const loadChartDataFromServer = async (id: number, current: number, pageSize: number) => {
+    setPreviewLoading(true);
+    try {
+      const res = await previewChartDataUsingGet({
+        chartId: id,
+        current,
+        pageSize,
+      });
+      if (res.data) {
+        const { headers, data, total } = res.data;
+        const columns = (headers || []).map((header: string) => ({
+          title: header,
+          dataIndex: header,
+          key: header,
+          width: 150,
+          ellipsis: true,
+        }));
+        const dataSource = (data || []).map((row: string[], index: number) => {
+          const rowData: any = { key: index };
+          (headers || []).forEach((header, i) => {
+            rowData[header] = row[i];
+          });
+          return rowData;
+        });
+
+        setPreviewColumns(columns);
+        setPreviewData(dataSource);
+        setPreviewTotal(Number(total) || 0);
+      }
+    } catch (e: any) {
+      message.error('加载数据失败：' + e.message);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleHistoryPreview = (chart: API.Chart, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!chart.id) return;
+    setIsServerPreview(true);
+    setPreviewChartId(chart.id);
+    setPreviewParams({ current: 1, pageSize: 10 });
+    setPreviewModalOpen(true);
+    loadChartDataFromServer(chart.id, 1, 10);
+  };
+
+  const handleLocalPreview = () => {
+    const fileList = form.getFieldValue('file');
+    if (!fileList || fileList.length === 0) {
+      message.warning('请先上传文件');
+      return;
+    }
+    const file = fileList[0].originFileObj;
+    if (!file) return;
+
+    setIsServerPreview(false);
+    setPreviewLoading(true);
+    setPreviewModalOpen(true);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result;
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+        if (jsonData.length > 0) {
+          const headers = jsonData[0] as string[];
+          const columns = headers.map((header, index) => ({
+            title: header,
+            dataIndex: index,
+            key: index,
+            width: 150,
+            ellipsis: true,
+          }));
+          const dataSource = jsonData.slice(1).map((row: any, rowIndex) => {
+            const rowData: any = { key: rowIndex };
+            row.forEach((cell: any, cellIndex: number) => {
+              rowData[cellIndex] = cell;
+            });
+            return rowData;
+          });
+
+          setPreviewColumns(columns);
+          setPreviewData(dataSource);
+          setPreviewTotal(dataSource.length);
+        } else {
+          setPreviewColumns([]);
+          setPreviewData([]);
+        }
+      } catch (error) {
+        message.error('文件解析失败');
+      } finally {
+        setPreviewLoading(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
 
   const handleExchangeVip = async () => {
     if (!vipCode) {
@@ -709,9 +817,7 @@ const AddChart: React.FC = () => {
         </div>
       </Header>
 
-      {/* [修改] 使用 hasSider 属性强制水平布局 */}
       <Layout hasSider>
-        {/* [新增] Resizable 拖拽容器 */}
         <Resizable
           size={{ width: collapsed ? 80 : siderWidth, height: '100%' }}
           minWidth={200}
@@ -748,7 +854,7 @@ const AddChart: React.FC = () => {
             style={{
               borderRight: '1px solid #f0f0f0',
               height: '100%',
-              overflow: 'hidden', // 防止拖拽时内容溢出
+              overflow: 'hidden',
             }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -915,9 +1021,17 @@ const AddChart: React.FC = () => {
 
                             {!collapsed && (
                               <Space size={2}>
-
                                 {item.status === 'succeed' || item.status === 'failed' ? (
                                   <>
+                                    <Tooltip title="查看数据">
+                                      <Button
+                                        type="text"
+                                        size="small"
+                                        icon={<TableOutlined style={{ fontSize: 12 }} />}
+                                        onClick={(e) => handleHistoryPreview(item, e)}
+                                      />
+                                    </Tooltip>
+
                                     <Button
                                       type="text"
                                       size="small"
@@ -1132,23 +1246,35 @@ const AddChart: React.FC = () => {
                     </Row>
 
                     <Form.Item
-                      name="file"
                       label="原始数据"
-                      rules={[{ required: true, message: '请上传数据' }]}
-                      getValueFromEvent={normFile}
+                      extra="支持 .xlsx, .xls 格式"
+                      required
                     >
-                      <Upload
-                        name="file"
-                        maxCount={1}
-                        accept=".xlsx,.xls"
-                        listType="picture-card"
-                        customRequest={({ onSuccess }) => setTimeout(() => onSuccess?.('ok'), 0)}
-                      >
-                        <div>
-                          <PlusOutlined />
-                          <div style={{ marginTop: 8 }}>上传 Excel</div>
-                        </div>
-                      </Upload>
+                      <Space>
+                        <Form.Item
+                          name="file"
+                          noStyle
+                          rules={[{ required: true, message: '请上传数据' }]}
+                          getValueFromEvent={normFile}
+                        >
+                          <Upload
+                            name="file"
+                            maxCount={1}
+                            accept=".xlsx,.xls"
+                            listType="text"
+                            customRequest={({ onSuccess }) => setTimeout(() => onSuccess?.('ok'), 0)}
+                          >
+                            <Button icon={<PlusOutlined />}>上传 Excel</Button>
+                          </Upload>
+                        </Form.Item>
+
+                        <Button
+                          icon={<EyeOutlined />}
+                          onClick={handleLocalPreview}
+                        >
+                          查看数据
+                        </Button>
+                      </Space>
                     </Form.Item>
 
                     <Form.Item>
@@ -1310,7 +1436,41 @@ const AddChart: React.FC = () => {
         </Content>
       </Layout>
 
-      {/* 编辑模态框 */}
+      {/* [修改] 优化后的 Modal 和 Table */}
+      <Modal
+        title={isServerPreview ? '历史数据预览' : '待上传数据预览'}
+        open={previewModalOpen}
+        onCancel={() => setPreviewModalOpen(false)}
+        footer={null}
+        width={900}
+        destroyOnClose
+      >
+        <Table
+          columns={previewColumns}
+          dataSource={previewData}
+          loading={previewLoading}
+          scroll={{ x: 'max-content', y: 480 }}
+          pagination={
+            isServerPreview
+              ? {
+                  current: previewParams.current,
+                  pageSize: previewParams.pageSize,
+                  total: previewTotal,
+                  showSizeChanger: true,
+                  showQuickJumper: true,
+                  showTotal: (total) => `共 ${total} 条数据`,
+                  onChange: (page, pageSize) => {
+                    setPreviewParams({ current: page, pageSize });
+                    if (previewChartId) {
+                      loadChartDataFromServer(previewChartId, page, pageSize);
+                    }
+                  },
+                }
+              : { defaultPageSize: 10, showSizeChanger: true }
+          }
+        />
+      </Modal>
+
       <Modal
         title="编辑图表信息"
         open={editModalOpen}
@@ -1344,7 +1504,6 @@ const AddChart: React.FC = () => {
         </Form>
       </Modal>
 
-      {/* 个人中心/设置 */}
       <Modal
         open={userModalOpen}
         onCancel={() => setUserModalOpen(false)}
@@ -1442,7 +1601,6 @@ const AddChart: React.FC = () => {
         />
       </Modal>
 
-      {/* VIP 弹窗 */}
       <Modal
         title="升级为 VIP 会员"
         open={vipModalOpen}
