@@ -9,6 +9,9 @@ import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class RedisLimiterManager {
@@ -32,13 +35,15 @@ public class RedisLimiterManager {
     }
 
     /**
-     * 针对不同用户进行限流
+     * 针对不同用户进行限流(每天0点自动刷新)
      * @param userId
      * @param userRole
      */
     public void doDailyLimit(Long userId, String userRole) {
         //1.每日限流key
-        String dailyKey = "gen_chart_daily_" + userId;
+        String todayStr = getTodayStr();
+        //key 格式：gen_chart_daily_123_20231201
+        String dailyKey = "gen_chart_daily_" + userId+"_" + todayStr;
         RRateLimiter dailyLimiter = redissonClient.getRateLimiter(dailyKey);
         // 2. 判断角色分配额度
         // 假设 "vip" 为会员角色，"admin" 也拥有高额度，其他为普通用户
@@ -46,13 +51,11 @@ public class RedisLimiterManager {
         if ("vip".equals(userRole) || "admin".equals(userRole)) {
             dailyLimitCount = 50; // 会员/管理员 50 次
         }
-
-        // 3. 设置限流规则：24小时内 X 次
-        // 注意：Redisson 的 RateLimiter 是滑动窗口或令牌桶，不是严格的“自然日归零”
-        // 如果需要严格自然日（0点清空），建议使用 Redis String + Expire 实现，但 Redisson 更简单
-        dailyLimiter.trySetRate(RateType.OVERALL, dailyLimitCount, 24, RateIntervalUnit.HOURS);
-        //这里是几点清零呢？
-
+        if(!dailyLimiter.isExists())
+        {
+            dailyLimiter.trySetRate(RateType.OVERALL, dailyLimitCount, 24, RateIntervalUnit.HOURS);
+            dailyLimiter.expire(1, TimeUnit.DAYS);
+        }
         // 4. 尝试获取令牌
         if (!dailyLimiter.tryAcquire(1)) {
             String message = "vip".equals(userRole) ? "今日次数已达上限 (50次)" : "非会员每日仅限 3 次，请升级会员";
@@ -67,7 +70,8 @@ public class RedisLimiterManager {
      * @return  剩余次数
      */
     public long getRemainingPermits(Long userId, String userRole) {
-        String dailyKey = "gen_chart_daily_" + userId;
+        String todayStr = getTodayStr();
+        String dailyKey = "gen_chart_daily_" + userId + "_" + todayStr;
         RRateLimiter dailyLimiter = redissonClient.getRateLimiter(dailyKey);
 
         // 计算该用户角色的总额度
@@ -89,7 +93,15 @@ public class RedisLimiterManager {
      * 删除用户的限流key
      */
     public void deleteUserRateLimit(Long userId, String userRole){
-        String dailyKey = "gen_chart_daily_" + userId;
+        String todayStr = getTodayStr();
+        String dailyKey = "gen_chart_daily_" + userId + "_" + todayStr;
         redissonClient.getRateLimiter(dailyKey).delete();
+    }
+    /**
+     * 辅助方法：获取当前日期字符串 (yyyyMMdd)
+     */
+    private String getTodayStr() {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMdd");
+        return sdf.format(new Date());
     }
 }

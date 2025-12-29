@@ -55,5 +55,10 @@ public class LoginUserVO implements Serializable {
      */
     private Long leftNum;
 
+    /**
+     * 用户token
+     */
+    private String token;
+
     private static final long serialVersionUID = 1L;
 }

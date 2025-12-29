@@ -83,12 +83,26 @@ wx:
 # todo 需替换配置
 cos:
   client:
-    accessKey: xxx
-    secretKey: xxx
-    region: xxx
-    bucket: xxx
+    accessKey: xxxxxx
+    secretKey: INSERT_YOUR_KEY_HERE
+    region: ap-beijing
+    bucket: bi-project-1393590899
 ai:
   qianfan:
     api-key: "sk-b98311dd0ceb4f7ba6a8063d23c90569"
     url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     model: "qwen-plus"
+rabbitmq:
+  host: localhost
+  port: 5672
+  username: guest
+  password: guest
+  listener:
+    simple:
+      acknowledge-mode: manual # 开启手动ACK，为了更精准控制
+      retry:
+        enabled: true # 开启消费者重试
+        max-attempts: 3 # 最大重试次数 (包含第一次)
+        initial-interval: 2000ms # 初始间隔 2s
+        multiplier: 2 # 重试间隔倍数
+        max-interval: 10000ms

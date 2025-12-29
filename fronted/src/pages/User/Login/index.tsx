@@ -1,6 +1,14 @@
 import Footer from '@/components/Footer';
-import { getFakeCaptcha } from '@/services/ant-design-pro/login';
-import { getLoginUserUsingGet, userLoginUsingPost as login, userLoginUsingPost } from '@/services/bi/userController';
+import {
+  getCaptchaUsingGet,
+  getLoginUserUsingGet,
+  userLoginUsingPost,   // 对应 /api/user/login/phone
+  userLoginUsingPost1,  // 对应 /api/user/login
+} from '@/services/bi/userController';
+import {
+  ModalForm, // 新增
+} from '@ant-design/pro-components';
+import { userPasswordResetUsingPost } from '@/services/bi/userController'; // 新增引入
 import {
   AlipayCircleOutlined,
   LockOutlined,
@@ -62,8 +70,8 @@ const LoginMessage: React.FC<{
 
 const Login: React.FC = () => {
   const [userLoginState, setUserLoginState] = useState<API.LoginResult>({});
-  const [type, setType] = useState<string>('account');
-  const { initialState, setInitialState } = useModel('@@initialState');
+  const [type, setType] = useState<string>('account'); // 登录类型：account 或 mobile
+  const { setInitialState } = useModel('@@initialState');
   const containerClassName = useEmotionCss(() => {
     return {
       display: 'flex',
@@ -76,35 +84,52 @@ const Login: React.FC = () => {
     };
   });
 
-  const fetchUserInfo = async () => { //用户登录成功后，获取用户的登录信息
+  const fetchUserInfo = async () => {
     const userInfo = await getLoginUserUsingGet();
     if (userInfo) {
       flushSync(() => {
-        setInitialState((s) => ({  //全局存储
+        setInitialState((s) => ({
           ...s,
-          currentUser: userInfo?.data,  // 修改：提取 data 以匹配 LoginUserVO 类型
+          currentUser: userInfo?.data,
         }));
       });
     }
   };
 
-  const handleSubmit = async (values: API.UserLoginRequest) => {
+  const handleSubmit = async (values: API.UserLoginRequest & API.UserLoginByPhoneRequest) => {
     try {
-      // 登录
-      const res = await userLoginUsingPost({
-        ...values,
-      });
-      
-      // 修改点：根据后端返回的 code 判断是否成功 (0 表示成功)
+      let res;
+      // 【修改点】根据 tab 类型调用不同的登录接口
+      if (type === 'account') {
+        // 账号密码登录
+        res = await userLoginUsingPost1({
+          userAccount: values.userAccount,
+          userPassword: values.userPassword,
+        });
+      } else {
+        // 手机号登录
+        res = await userLoginUsingPost({
+          phone: values.phone,
+          code: values.code,
+        });
+      }
+
       if (res.code === 0) {
         const defaultLoginSuccessMessage = '登录成功！';
         message.success(defaultLoginSuccessMessage);
+
+        // 保存 Token 到 localStorage
+        if (res.data?.token) {
+          localStorage.setItem('token', res.data.token);
+        }
+
+        // 获取用户信息
         await fetchUserInfo();
+
         const urlParams = new URL(window.location.href).searchParams;
         history.push(urlParams.get('redirect') || '/');
         return;
       } else {
-        // 如果失败，显示后端返回的错误信息
         message.error(res.message);
       }
     } catch (error) {
@@ -113,8 +138,9 @@ const Login: React.FC = () => {
       message.error(defaultLoginFailureMessage);
     }
   };
-  
+
   const { status, type: loginType } = userLoginState;
+
   return (
     <div className={containerClassName}>
       <Helmet>
@@ -142,7 +168,8 @@ const Login: React.FC = () => {
           }}
           actions={['其他登录方式 :', <ActionIcons key="icons" />]}
           onFinish={async (values) => {
-            await handleSubmit(values as API.UserLoginRequest);
+            // 这里 values 会包含当前 tab 下的所有字段
+            await handleSubmit(values as any);
           }}
         >
           <Tabs
@@ -162,18 +189,17 @@ const Login: React.FC = () => {
           />
 
           {status === 'error' && loginType === 'account' && (
-            <LoginMessage content={'错误的用户名和密码(admin/ant.design)'} />
+            <LoginMessage content={'错误的用户名和密码'} />
           )}
           {type === 'account' && (
             <>
-              {/* 修改点：name 改为 userAccount */}
               <ProFormText
                 name="userAccount"
                 fieldProps={{
                   size: 'large',
                   prefix: <UserOutlined />,
                 }}
-                placeholder={'用户名: cyuyu'}
+                placeholder={'请输入用户名'}
                 rules={[
                   {
                     required: true,
@@ -181,14 +207,13 @@ const Login: React.FC = () => {
                   },
                 ]}
               />
-              {/* 修改点：name 改为 userPassword */}
               <ProFormText.Password
                 name="userPassword"
                 fieldProps={{
                   size: 'large',
                   prefix: <LockOutlined />,
                 }}
-                placeholder={'密码: 11111111'}
+                placeholder={'请输入密码'}
                 rules={[
                   {
                     required: true,
@@ -202,12 +227,13 @@ const Login: React.FC = () => {
           {status === 'error' && loginType === 'mobile' && <LoginMessage content="验证码错误" />}
           {type === 'mobile' && (
             <>
+              {/* 【修改点】name改为 phone，与后端 UserLoginByPhoneRequest 对应 */}
               <ProFormText
                 fieldProps={{
                   size: 'large',
                   prefix: <MobileOutlined />,
                 }}
-                name="mobile"
+                name="phone"
                 placeholder={'请输入手机号！'}
                 rules={[
                   {
@@ -220,6 +246,7 @@ const Login: React.FC = () => {
                   },
                 ]}
               />
+              {/* 【修改点】name改为 code，与后端对应 */}
               <ProFormCaptcha
                 fieldProps={{
                   size: 'large',
@@ -235,7 +262,8 @@ const Login: React.FC = () => {
                   }
                   return '获取验证码';
                 }}
-                name="captcha"
+                name="code"
+                phoneName="phone" // 关联手机号字段，用于校验手机号是否已填
                 rules={[
                   {
                     required: true,
@@ -243,13 +271,18 @@ const Login: React.FC = () => {
                   },
                 ]}
                 onGetCaptcha={async (phone) => {
-                  const result = await getFakeCaptcha({
-                    phone,
-                  });
-                  if (!result) {
-                    return;
+                  // 【修改点】调用真实后端接口
+                  try {
+                    const res = await getCaptchaUsingGet({ phone });
+                    if (res.code === 0 && res.data) {
+                      message.success(`验证码获取成功：${res.data}`);
+                    } else {
+                      throw new Error(res.message || '获取验证码失败');
+                    }
+                  } catch (error: any) {
+                    message.error(error.message);
+                    throw error; // 抛出错误以停止倒计时
                   }
-                  message.success('获取验证码成功！验证码为：1234');
                 }}
               />
             </>
@@ -262,13 +295,116 @@ const Login: React.FC = () => {
             <ProFormCheckbox noStyle name="autoLogin">
               自动登录
             </ProFormCheckbox>
-            <a
-              style={{
-                float: 'right',
+           <div
+            style={{
+              marginBottom: 24,
+            }}
+          >
+            
+            {/* --- 忘记密码弹窗开始 --- */}
+            <ModalForm
+              title="重置密码"
+              trigger={
+                <a
+                  style={{
+                    float: 'right',
+                  }}
+                >
+                  忘记密码 ?
+                </a>
+              }
+              width={500}
+              autoFocusFirstInput
+              onFinish={async (values) => {
+                try {
+                  // 调用重置密码接口
+                  const res = await userPasswordResetUsingPost({
+                    phone: values.phone,
+                    code: values.code,
+                    newPassword: values.newPassword,
+                  });
+                  if (res.code === 0 && res.data) {
+                    message.success('密码重置成功，请重新登录');
+                    return true; // 关闭弹窗
+                  } else {
+                    throw new Error(res.message);
+                  }
+                } catch (error: any) {
+                  message.error(error.message || '重置失败，请重试');
+                  return false; // 阻止关闭
+                }
               }}
             >
-              忘记密码 ?
-            </a>
+              <ProFormText
+                name="phone"
+                fieldProps={{
+                  size: 'large',
+                  prefix: <MobileOutlined />,
+                }}
+                placeholder={'请输入手机号'}
+                rules={[
+                  {
+                    required: true,
+                    message: '请输入手机号！',
+                  },
+                  {
+                    pattern: /^1\d{10}$/,
+                    message: '手机号格式错误！',
+                  },
+                ]}
+              />
+              <ProFormCaptcha
+                fieldProps={{
+                  size: 'large',
+                  prefix: <LockOutlined />,
+                }}
+                captchaProps={{
+                  size: 'large',
+                }}
+                placeholder={'请输入验证码'}
+                captchaTextRender={(timing, count) => {
+                  return timing ? `${count} ${'秒后重新获取'}` : '获取验证码';
+                }}
+                name="code"
+                phoneName="phone" // 关联上面的 phone 字段
+                rules={[
+                  {
+                    required: true,
+                    message: '请输入验证码！',
+                  },
+                ]}
+                onGetCaptcha={async (phone) => {
+                  // 复用之前的获取验证码接口
+                  const res = await getCaptchaUsingGet({ phone });
+                  if (res.code === 0 && res.data) {
+                    message.success(`验证码已发送: ${res.data}`); // 生产环境请去掉验证码显示
+                  } else {
+                    throw new Error(res.message);
+                  }
+                }}
+              />
+              <ProFormText.Password
+                name="newPassword"
+                fieldProps={{
+                  size: 'large',
+                  prefix: <LockOutlined />,
+                }}
+                placeholder={'请输入新密码'}
+                rules={[
+                  {
+                    required: true,
+                    message: '请输入新密码！',
+                  },
+                  {
+                    min: 8,
+                    message: '密码长度不能少于 8 位！',
+                  },
+                ]}
+              />
+            </ModalForm>
+            {/* --- 忘记密码弹窗结束 --- */}
+            
+          </div>
           </div>
         </LoginForm>
         <div style={{ textAlign: 'center', marginTop: 16 }}>

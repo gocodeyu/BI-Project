@@ -1,7 +1,15 @@
 ﻿export default [
-  { path: '/user', layout: false, routes: [{ path: '/user/login', component: './User/Login' }, { path: '/user/register', component: './User/Register' }] },
-  {path:'/',redirect:'/add_chart'},
-  {name:'添加图表',icon:'smile',path:'/add_chart',component:'./AddChart',layout: false},
+  {
+    path: '/user',
+    layout: false,
+    routes: [
+      { path: '/user/login', component: './User/Login' },
+      { path: '/user/register', component: './User/Register' },
+    ],
+  },
+  { path: '/', redirect: '/add_chart' },
+  { name: '添加图表', icon: 'smile', path: '/add_chart', component: './AddChart', layout: false },
+  { name: '回收站', icon: 'delete', path: '/recycle-bin', component: './RecycleBin', layout: false },
   { path: '/welcome', icon: 'smile', component: './Welcome' },
   {
     path: '/admin',
@@ -13,6 +21,5 @@
     ],
   },
   { icon: 'table', path: '/list', component: './TableList' },
-  { path: '/', redirect: '/welcome' },
   { path: '*', layout: false, component: './404' },
 ];

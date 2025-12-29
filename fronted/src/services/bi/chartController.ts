@@ -32,12 +32,42 @@ export async function deleteChartUsingPost(
   });
 }
 
+/** deleteChartforever POST /api/chart/delete/forever */
+export async function deleteChartforeverUsingPost(
+  body: API.DeleteRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBoolean_>('/api/chart/delete/forever', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
 /** editChart POST /api/chart/edit */
 export async function editChartUsingPost(
   body: API.ChartEditRequest,
   options?: { [key: string]: any },
 ) {
   return request<API.BaseResponseBiResponse_>('/api/chart/edit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
+/** editChartRabbitmq POST /api/chart/edit/rabbitmq */
+export async function editChartRabbitmqUsingPost(
+  body: API.ChartEditRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBiResponse_>('/api/chart/edit/rabbitmq', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -129,12 +159,68 @@ export async function genChartByAiAsyncUsingPost(
   });
 }
 
+/** genChartByAiAsyncRabbitmq POST /api/chart/gen/async/rabbitmq */
+export async function genChartByAiAsyncRabbitmqUsingPost(
+  // 叠加生成的Param类型 (非body参数swagger默认没有生成对象)
+  params: API.genChartByAiAsyncRabbitmqUsingPOSTParams,
+  body: {},
+  file?: File,
+  options?: { [key: string]: any },
+) {
+  const formData = new FormData();
+
+  if (file) {
+    formData.append('file', file);
+  }
+
+  Object.keys(body).forEach((ele) => {
+    const item = (body as any)[ele];
+
+    if (item !== undefined && item !== null) {
+      if (typeof item === 'object' && !(item instanceof File)) {
+        if (item instanceof Array) {
+          item.forEach((f) => formData.append(ele, f || ''));
+        } else {
+          formData.append(ele, new Blob([JSON.stringify(item)], { type: 'application/json' }));
+        }
+      } else {
+        formData.append(ele, item);
+      }
+    }
+  });
+
+  return request<API.BaseResponseBiResponse_>('/api/chart/gen/async/rabbitmq', {
+    method: 'POST',
+    params: {
+      ...params,
+    },
+    data: formData,
+    requestType: 'form',
+    ...(options || {}),
+  });
+}
+
 /** retryChart POST /api/chart/gen/retry */
 export async function retryChartUsingPost(
   body: API.ChartReloadRequest,
   options?: { [key: string]: any },
 ) {
   return request<API.BaseResponseBoolean_>('/api/chart/gen/retry', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
+/** retryChartRabbitmq POST /api/chart/gen/retry/rabbitmq */
+export async function retryChartRabbitmqUsingPost(
+  body: API.ChartReloadRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBoolean_>('/api/chart/gen/retry/rabbitmq', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -174,6 +260,21 @@ export async function listChartByPageUsingPost(
   });
 }
 
+/** listMyChartByPagedelete POST /api/chart/my/delete/list/page */
+export async function listMyChartByPagedeleteUsingPost(
+  body: API.ChartQueryRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponsePageChart_>('/api/chart/my/delete/list/page', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
 /** listMyChartByPage POST /api/chart/my/list/page */
 export async function listMyChartByPageUsingPost(
   body: API.ChartQueryRequest,
@@ -185,6 +286,33 @@ export async function listMyChartByPageUsingPost(
       'Content-Type': 'application/json',
     },
     data: body,
+    ...(options || {}),
+  });
+}
+
+/** recoverChart POST /api/chart/recover */
+export async function recoverChartUsingPost(
+  body: API.ChartUpdateRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBoolean_>('/api/chart/recover', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
+/** getChartDataPreview GET /chart/data/preview */
+export async function getChartDataPreviewUsingGet(
+  params: API.ChartDataPreviewRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.ChartDataPreviewResponse>('/chart/data/preview', {
+    method: 'GET',
+    params,
     ...(options || {}),
   });
 }

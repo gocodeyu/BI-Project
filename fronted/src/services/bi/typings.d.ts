@@ -136,6 +136,18 @@ declare namespace API {
     id?: number;
   };
 
+  type ChartDataPreviewRequest = {
+    chartId?: number;
+    current?: number;
+    pageSize?: number;
+  };
+
+  type ChartDataPreviewResponse = {
+    headers?: string[];
+    data?: string[][];
+    total?: number;
+  };
+
   type ChartUpdateRequest = {
     chartData?: string;
     chartType?: string;
@@ -153,6 +165,12 @@ declare namespace API {
     id?: number;
   };
 
+  type genChartByAiAsyncRabbitmqUsingPOSTParams = {
+    chartType?: string;
+    goal?: string;
+    name?: string;
+  };
+
   type genChartByAiAsyncUsingPOSTParams = {
     chartType?: string;
     goal?: string;
@@ -163,6 +181,11 @@ declare namespace API {
     chartType?: string;
     goal?: string;
     name?: string;
+  };
+
+  type getCaptchaUsingGETParams = {
+    /** phone */
+    phone?: string;
   };
 
   type getChartByIdUsingGETParams = {
@@ -189,6 +212,7 @@ declare namespace API {
     createTime?: string;
     id?: number;
     leftNum?: number;
+    token?: string;
     updateTime?: string;
     userAccount?: string;
     userAvatar?: string;
@@ -330,11 +354,13 @@ declare namespace API {
     createTime?: string;
     id?: number;
     isDelete?: number;
+    phone?: string;
     updateTime?: string;
     userAccount?: string;
     userAvatar?: string;
     userName?: string;
     userPassword?: string;
+    userProfile?: string;
     userRole?: string;
   };
 
@@ -345,9 +371,20 @@ declare namespace API {
     userRole?: string;
   };
 
+  type UserLoginByPhoneRequest = {
+    code?: string;
+    phone?: string;
+  };
+
   type UserLoginRequest = {
     userAccount?: string;
     userPassword?: string;
+  };
+
+  type UserPasswordResetRequest = {
+    code?: string;
+    newPassword?: string;
+    phone?: string;
   };
 
   type UserQueryRequest = {
@@ -366,6 +403,8 @@ declare namespace API {
 
   type UserRegisterRequest = {
     checkPassword?: string;
+    code?: string;
+    phone?: string;
     userAccount?: string;
     userPassword?: string;
   };

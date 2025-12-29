@@ -34,6 +34,16 @@
         PRIMARY KEY (`id`)
         ) COMMENT '用户上传数据分表' COLLATE = utf8mb4_unicode_ci;
     </update>
+    <update id="recoverChart">
+        update chart set isDelete = 0 where id = #{id}
+    </update>
+
+    <delete id="deleteByIdforever">
+    delete from chart where id = #{id}
+    </delete>
+    <delete id="chartTable">
+            drop table ${tableName}
+    </delete>
 
 
     <insert id="insertChartData">
@@ -63,6 +73,21 @@
         </foreach>
         from ${tableName}
     </select>
+    <select id="queryListDelete" resultType="com.yupi.springbootinit.model.entity.Chart">
+        select * from chart
+        ${ew.customSqlSegment}
+    </select>
+    <select id="getById" resultType="com.yupi.springbootinit.model.entity.Chart">
+            select * from chart where id=#{id}
+    </select>
 
+    <select id="queryChartDataWithPage" resultType="java.util.LinkedHashMap">
+        SELECT * FROM ${tableName} 
+        ORDER BY id 
+        LIMIT #{offset}, #{pageSize}
+    </select>
 
+    <select id="countChartData" resultType="java.lang.Long">
+        SELECT COUNT(*) FROM ${tableName}
+    </select>
 </mapper>

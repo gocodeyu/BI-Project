@@ -1,4 +1,4 @@
-package com.yupi.springbootinit.config;
+package com.yupi.springbootinit.manager;
 
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanPostProcessor;

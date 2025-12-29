@@ -1,6 +1,7 @@
 package com.yupi.springbootinit.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.google.gson.Gson;
 import com.yupi.springbootinit.annotation.AuthCheck;
 import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.DeleteRequest;
@@ -11,23 +12,20 @@ import com.yupi.springbootinit.constant.UserConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.exception.ThrowUtils;
 import com.yupi.springbootinit.manager.RedisLimiterManager;
-import com.yupi.springbootinit.model.dto.user.UserAddRequest;
-import com.yupi.springbootinit.model.dto.user.UserLoginRequest;
-import com.yupi.springbootinit.model.dto.user.UserQueryRequest;
-import com.yupi.springbootinit.model.dto.user.UserRegisterRequest;
-import com.yupi.springbootinit.model.dto.user.UserUpdateMyRequest;
-import com.yupi.springbootinit.model.dto.user.UserUpdateRequest;
+import com.yupi.springbootinit.model.dto.user.*;
 import com.yupi.springbootinit.model.entity.User;
 import com.yupi.springbootinit.model.vo.LoginUserVO;
 import com.yupi.springbootinit.model.vo.UserVO;
 import com.yupi.springbootinit.service.UserService;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -54,6 +52,15 @@ public class UserController {
     @Resource
     private RedisLimiterManager redisLimiterManager;
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+    private static final Gson GSON = new Gson();
+
+    // 定义 Redis Key 前缀
+    private static final String LOGIN_USER_KEY_PREFIX = "login:token:";
+    // Token 过期时间（例如 30 分钟）
+    private static final long LOGIN_USER_TTL = 30L;
+
     // region 登录相关
 
     /**
@@ -70,22 +77,25 @@ public class UserController {
         String userAccount = userRegisterRequest.getUserAccount();
         String userPassword = userRegisterRequest.getUserPassword();
         String checkPassword = userRegisterRequest.getCheckPassword();
-        if (StringUtils.isAnyBlank(userAccount, userPassword, checkPassword)) {
+        String code = userRegisterRequest.getCode();
+        String phone= userRegisterRequest.getPhone();
+        if (StringUtils.isAnyBlank(userAccount, userPassword, checkPassword,phone,code)) {
             return null;
         }
-        long result = userService.userRegister(userAccount, userPassword, checkPassword);
+        long result = userService.userRegister(userAccount, userPassword, checkPassword,phone,code);
         return ResultUtils.success(result);
     }
+    
 
     /**
-     * 用户登录
+     * 用户登录，分布式
      *
      * @param userLoginRequest
      * @param request
      * @return
      */
     @PostMapping("/login")
-    public BaseResponse<LoginUserVO> userLogin(@RequestBody UserLoginRequest userLoginRequest, HttpServletRequest request) {
+    public BaseResponse<LoginUserVO> userLogin (@RequestBody UserLoginRequest userLoginRequest, HttpServletRequest request) {
         if (userLoginRequest == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
@@ -96,6 +106,32 @@ public class UserController {
         }
         LoginUserVO loginUserVO = userService.userLogin(userAccount, userPassword, request);
         return ResultUtils.success(loginUserVO);
+    }
+
+    @PostMapping("/login/phone")
+    public BaseResponse<LoginUserVO> userLogin (@RequestBody UserLoginByPhoneRequest userLoginRequest, HttpServletRequest request) {
+        if (userLoginRequest == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        String phone = userLoginRequest.getPhone();
+        String code = userLoginRequest.getCode();
+        if (StringUtils.isAnyBlank(phone, code)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        LoginUserVO loginUserVO = userService.userLoginByPhone(phone, code, request);
+        return ResultUtils.success(loginUserVO);
+    }
+
+    /**
+     * 获取验证码
+     */
+    @GetMapping("/get/captcha")
+    public BaseResponse<Boolean> getCaptcha(String phone) {
+        if (StringUtils.isBlank(phone)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        userService.getCaptcha(phone);
+        return ResultUtils.success(true);
     }
 
     /**
@@ -318,5 +354,27 @@ public class UserController {
         boolean result = userService.updateById(user);
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
         return ResultUtils.success(true);
+    }
+    /**
+     * 用户重置密码
+     *
+     * @param passwordResetRequest
+     * @return
+     */
+    @PostMapping("/password/reset")
+    public BaseResponse<Boolean> userPasswordReset(@RequestBody UserPasswordResetRequest passwordResetRequest) {
+        if (passwordResetRequest == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        String phone = passwordResetRequest.getPhone();
+        String code = passwordResetRequest.getCode();
+        String newPassword = passwordResetRequest.getNewPassword();
+
+        if (StringUtils.isAnyBlank(phone, code, newPassword)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+
+        boolean result = userService.userPasswordReset(phone, code, newPassword);
+        return ResultUtils.success(result);
     }
 }

@@ -47,11 +47,13 @@ public class User implements Serializable {
     /**
      * 创建时间
      */
+    @TableField(fill = FieldFill.INSERT) // 插入时自动填充
     private Date createTime;
 
     /**
      * 更新时间
      */
+    @TableField(fill = FieldFill.INSERT_UPDATE) // 插入和更新时自动填充
     private Date updateTime;
 
     /**
@@ -59,6 +61,16 @@ public class User implements Serializable {
      */
     @TableLogic
     private Integer isDelete;
+
+    /**
+     * 个人简介
+     */
+    private String userProfile;
+
+    /**
+     * 手机号
+     */
+    private String phone;
 
     @TableField(exist = false)
     private static final long serialVersionUID = 1L;

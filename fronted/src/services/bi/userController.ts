@@ -59,6 +59,21 @@ export async function getUserByIdUsingGet(
   });
 }
 
+/** getCaptcha GET /api/user/get/captcha */
+export async function getCaptchaUsingGet(
+  // 叠加生成的Param类型 (非body参数swagger默认没有生成对象)
+  params: API.getCaptchaUsingGETParams,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBoolean_>('/api/user/get/captcha', {
+    method: 'GET',
+    params: {
+      ...params,
+    },
+    ...(options || {}),
+  });
+}
+
 /** getLoginUser GET /api/user/get/login */
 export async function getLoginUserUsingGet(options?: { [key: string]: any }) {
   return request<API.BaseResponseLoginUserVO_>('/api/user/get/login', {
@@ -113,7 +128,7 @@ export async function listUserVoByPageUsingPost(
 }
 
 /** userLogin POST /api/user/login */
-export async function userLoginUsingPost(
+export async function userLoginUsingPost1(
   body: API.UserLoginRequest,
   options?: { [key: string]: any },
 ) {
@@ -127,10 +142,40 @@ export async function userLoginUsingPost(
   });
 }
 
+/** userLogin POST /api/user/login/phone */
+export async function userLoginUsingPost(
+  body: API.UserLoginByPhoneRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseLoginUserVO_>('/api/user/login/phone', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
+    ...(options || {}),
+  });
+}
+
 /** userLogout POST /api/user/logout */
 export async function userLogoutUsingPost(options?: { [key: string]: any }) {
   return request<API.BaseResponseBoolean_>('/api/user/logout', {
     method: 'POST',
+    ...(options || {}),
+  });
+}
+
+/** userPasswordReset POST /api/user/password/reset */
+export async function userPasswordResetUsingPost(
+  body: API.UserPasswordResetRequest,
+  options?: { [key: string]: any },
+) {
+  return request<API.BaseResponseBoolean_>('/api/user/password/reset', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    data: body,
     ...(options || {}),
   });
 }

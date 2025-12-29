@@ -16,14 +16,14 @@ export default {
     '/api/': {
       // 1. 指向你本地启动的 Spring Boot 后端地址
       target: 'http://localhost:12345',
-      
+
       // 2. 配置了这个可以从 http 代理到 https (虽然你本地是 http，但保留 true 没坏处)
       changeOrigin: true,
 
       // 3. 路径重写 (⚠️关键点，请仔细看下面的说明)
       // 如果你的后端接口本身就是 /api/user/login，请注释掉下面这行 pathRewrite
       // 如果你的后端接口是 /user/login (没有 api 前缀)，请保留下面这行 pathRewrite
-     // pathRewrite: { '^/api': '' },
+      // pathRewrite: { '^/api': '' },
     },
   },
 

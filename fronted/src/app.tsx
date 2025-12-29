@@ -8,8 +8,6 @@ import { history, Link } from '@umijs/max';
 import defaultSettings from '../config/defaultSettings';
 import { AvatarDropdown, AvatarName } from './components/RightContent/AvatarDropdown';
 import { errorConfig } from './requestErrorConfig';
-import { currentUser as queryCurrentUser } from './services/ant-design-pro/api';
-import { get } from 'lodash';
 import { getLoginUserUsingGet } from './services/bi/userController';
 const isDev = process.env.NODE_ENV === 'development';
 const loginPath = '/user/login';
@@ -26,6 +24,10 @@ export async function getInitialState(): Promise<{
   const fetchUserInfo = async () => {
     try {
       const userInfo = await getLoginUserUsingGet();
+      // 存储token到localStorage
+      if (userInfo?.data?.token) {
+        localStorage.setItem('token', userInfo.data.token);
+      }
       return userInfo?.data;
     } catch (error) {
       // 处理错误，例如返回 undefined 或默认值
@@ -49,7 +51,7 @@ export async function getInitialState(): Promise<{
   return {
     settings: defaultSettings as Partial<LayoutSettings>,
     loading: false,
-   // fetchUserInfo,
+    // fetchUserInfo,
   };
 }
 
@@ -57,7 +59,8 @@ export async function getInitialState(): Promise<{
 export const layout: RunTimeLayoutConfig = ({ initialState, setInitialState }) => {
   return {
     actionsRender: () => [<Question key="doc" />],
-    avatarProps: {//展示头像
+    avatarProps: {
+      //展示头像
       src: initialState?.currentUser?.userAvatar,
       title: <AvatarName />,
       render: (_, avatarChildren) => {
@@ -65,7 +68,7 @@ export const layout: RunTimeLayoutConfig = ({ initialState, setInitialState }) =
       },
     },
     waterMarkProps: {
-     // content: initialState?.currentUser?.name,
+      // content: initialState?.currentUser?.name,
     },
     footerRender: () => <Footer />,
     onPageChange: () => {
@@ -136,7 +139,22 @@ export const layout: RunTimeLayoutConfig = ({ initialState, setInitialState }) =
  * @doc https://umijs.org/docs/max/request#配置
  */
 export const request = {
-  baseURL: "",
+  baseURL: 'http://localhost:12345', // 确保这里指向你的后端地址
   withCredentials: true,
   ...errorConfig,
+  // 【新增】请求拦截器：每次请求前自动带上 Token
+  requestInterceptors: [
+    (url, options) => {
+      const token = localStorage.getItem('token');
+      // 如果本地有 token，将其添加到请求头 Authorization 中
+      if (token) {
+        const headers = {
+          ...options.headers,
+          Authorization: token, // 后端通过 request.getHeader("Authorization") 获取
+        };
+        return { url, options: { ...options, headers } };
+      }
+      return { url, options };
+    },
+  ],
 };

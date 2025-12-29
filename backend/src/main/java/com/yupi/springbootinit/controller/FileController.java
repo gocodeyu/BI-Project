@@ -4,6 +4,7 @@ import cn.hutool.core.io.FileUtil;
 import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.ErrorCode;
 import com.yupi.springbootinit.common.ResultUtils;
+import com.yupi.springbootinit.config.CosClientConfig;
 import com.yupi.springbootinit.constant.FileConstant;
 import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.manager.CosManager;
@@ -40,6 +41,10 @@ public class FileController {
     @Resource
     private CosManager cosManager;
 
+    // 用来拼接返回的 URL
+    @Resource
+    private CosClientConfig cosClientConfig;
+
     /**
      * 文件上传
      *
@@ -61,7 +66,8 @@ public class FileController {
         // 文件目录：根据业务、用户来划分
         String uuid = RandomStringUtils.randomAlphanumeric(8);
         String filename = uuid + "-" + multipartFile.getOriginalFilename();
-        String filepath = String.format("/%s/%s/%s", fileUploadBizEnum.getValue(), loginUser.getId(), filename);
+        String suffix = FileUtil.getSuffix(filename);
+        String filepath = String.format("/avatar/%s.%s", uuid, suffix);
         File file = null;
         try {
             // 上传文件
@@ -70,7 +76,10 @@ public class FileController {
             multipartFile.transferTo(file);
             cosManager.putObject(filepath, file);
             // 返回可访问地址
-            return ResultUtils.success(FileConstant.COS_HOST + filepath);
+            // 格式：https://{bucket}.cos.{region}.myqcloud.com/{filepath}
+            String url = String.format("https://%s.cos.%s.myqcloud.com%s",
+                    cosClientConfig.getBucket(), cosClientConfig.getRegion(), filepath);
+            return ResultUtils.success(url);
         } catch (Exception e) {
             log.error("file upload error, filepath = " + filepath, e);
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "上传失败");
@@ -96,10 +105,10 @@ public class FileController {
         long fileSize = multipartFile.getSize();
         // 文件后缀
         String fileSuffix = FileUtil.getSuffix(multipartFile.getOriginalFilename());
-        final long ONE_M = 1024 * 1024L;
+        final long ONE_M = 5*1024 * 1024L;
         if (FileUploadBizEnum.USER_AVATAR.equals(fileUploadBizEnum)) {
             if (fileSize > ONE_M) {
-                throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件大小不能超过 1M");
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件大小不能超过 5M");
             }
             if (!Arrays.asList("jpeg", "jpg", "svg", "png", "webp").contains(fileSuffix)) {
                 throw new BusinessException(ErrorCode.PARAMS_ERROR, "文件类型错误");
