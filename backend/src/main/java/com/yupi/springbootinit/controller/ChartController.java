@@ -31,6 +31,7 @@ import com.yupi.springbootinit.model.enums.FileUploadBizEnum;
 import com.yupi.springbootinit.model.enums.GenChartStatusEnum;
 import com.yupi.springbootinit.model.vo.BiResponse;
 import com.yupi.springbootinit.model.vo.ChartDataPreviewResponse;
+import com.yupi.springbootinit.model.vo.ChartListVO;
 import com.yupi.springbootinit.service.BiAsyncService;
 import com.yupi.springbootinit.service.ChartService;
 import com.yupi.springbootinit.service.UserService;
@@ -214,9 +215,10 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
     }
 
     /**
-     * 根据 id 获取
+     * 根据 id 获取（包含完整信息）
      *
      * @param id
+     * @param request
      * @return
      */
     @GetMapping("/get")
@@ -224,9 +226,14 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         if (id <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
+        User loginUser = userService.getLoginUser(request);
         Chart chart = chartService.getById(id);
         if (chart == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR);
+        }
+        // 仅本人或管理员可查看
+        if (!chart.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
         }
         return ResultUtils.success(chart);
     }
@@ -258,7 +265,7 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
      * @return
      */
     @PostMapping("/my/list/page")
-    public BaseResponse<Page<Chart>> listMyChartByPage(@RequestBody ChartQueryRequest chartQueryRequest,
+    public BaseResponse<Page<ChartListVO>> listMyChartByPage(@RequestBody ChartQueryRequest chartQueryRequest,
                                                        HttpServletRequest request) {
         if (chartQueryRequest == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
@@ -271,7 +278,15 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
         Page<Chart> chartPage = chartService.page(new Page<>(current, size),
                 getQueryWrapper(chartQueryRequest));
-        return ResultUtils.success(chartPage);
+        
+        // 转换为 ChartListVO，排除大字段
+        Page<ChartListVO> chartListVOPage = new Page<>(chartPage.getCurrent(), chartPage.getSize(), chartPage.getTotal());
+        List<ChartListVO> chartListVOList = chartPage.getRecords().stream()
+                .map(ChartListVO::objToVo)
+                .collect(java.util.stream.Collectors.toList());
+        chartListVOPage.setRecords(chartListVOList);
+        
+        return ResultUtils.success(chartListVOPage);
     }
     /**
      * 分页获取当前用户创建的资源列表

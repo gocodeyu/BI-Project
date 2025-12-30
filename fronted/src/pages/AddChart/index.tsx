@@ -5,6 +5,7 @@ import {
   previewChartDataUsingGet, // 预览接口
   listMyChartByPageUsingPost,
   retryChartRabbitmqUsingPost, // RabbitMQ 重试
+  getChartByIdUsingGet, // 获取完整图表信息
 } from '@/services/bi/chartController';
 import {
   exchangeVipUsingPost,
@@ -297,13 +298,20 @@ const AddChart: React.FC = () => {
             currentItem.status === 'succeed' &&
             selectedChart.status !== 'succeed'
           ) {
+            // 状态变为成功，调用接口获取完整信息
             try {
-              const opt = fixChartOption(currentItem.genChart ?? '{}');
-              if (!opt.title) opt.title = { text: currentItem.name };
-              setOption(opt);
-              setSelectedChart(currentItem);
-              message.success('图表生成完毕');
-            } catch (e) {}
+              const chartRes = await getChartByIdUsingGet({ id: currentItem.id });
+              if (chartRes.data) {
+                const chartData = chartRes.data;
+                const opt = fixChartOption(chartData.genChart ?? '{}');
+                if (!opt.title) opt.title = { text: chartData.name };
+                setOption(opt);
+                setSelectedChart(chartData);
+                message.success('图表生成完毕');
+              }
+            } catch (e) {
+              console.error('获取图表完整信息失败', e);
+            }
           }
         }
       }
@@ -966,7 +974,7 @@ const AddChart: React.FC = () => {
 
                     return (
                       <List.Item
-                        onClick={() => {
+                        onClick={async () => {
                           if (item.status === 'wait') {
                             message.warning('当前图表正在排队中，请稍候...');
                             return;
@@ -976,17 +984,30 @@ const AddChart: React.FC = () => {
                             return;
                           }
                           if (item.status === 'failed') {
-                            setSelectedChart(item);
-                            setOption(undefined);
+                            // 失败状态也需要获取完整信息以显示错误信息
+                            try {
+                              const res = await getChartByIdUsingGet({ id: item.id });
+                              if (res.data) {
+                                setSelectedChart(res.data);
+                                setOption(undefined);
+                              }
+                            } catch (e: any) {
+                              message.error('获取图表信息失败：' + e.message);
+                            }
                             return;
                           }
+                          // 成功状态：调用接口获取完整信息
                           try {
-                            const opt = fixChartOption(item.genChart ?? '{}');
-                            if (!opt.title) opt.title = { text: item.name };
-                            setOption(opt);
-                            setSelectedChart(item);
-                          } catch (e) {
-                            message.error('图表解析错误');
+                            const res = await getChartByIdUsingGet({ id: item.id });
+                            if (res.data) {
+                              const chartData = res.data;
+                              const opt = fixChartOption(chartData.genChart ?? '{}');
+                              if (!opt.title) opt.title = { text: chartData.name };
+                              setOption(opt);
+                              setSelectedChart(chartData);
+                            }
+                          } catch (e: any) {
+                            message.error('获取图表信息失败：' + e.message);
                           }
                         }}
                         style={{
