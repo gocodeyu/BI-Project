@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSE 连接测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #1890ff;
+            padding-bottom: 10px;
+        }
+        .log-container {
+            background: #000;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 5px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            margin-top: 20px;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 3px;
+            border-left: 3px solid #0f0;
+            padding-left: 10px;
+        }
+        .log-error {
+            color: #ff4d4f;
+            border-left-color: #ff4d4f;
+        }
+        .log-success {
+            color: #52c41a;
+            border-left-color: #52c41a;
+        }
+        .log-info {
+            color: #1890ff;
+            border-left-color: #1890ff;
+        }
+        button {
+            background: #1890ff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #40a9ff;
+        }
+        button:disabled {
+            background: #d9d9d9;
+            cursor: not-allowed;
+        }
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            margin-left: 10px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #52c41a;
+            color: white;
+        }
+        .status.disconnected {
+            background: #ff4d4f;
+            color: white;
+        }
+        .status.connecting {
+            background: #faad14;
+            color: white;
+        }
+        input {
+            padding: 8px;
+            border: 1px solid #d9d9d9;
+            border-radius: 4px;
+            width: 400px;
+        }
+        .input-group {
+            margin: 15px 0;
+        }
+        .input-group label {
+            display: inline-block;
+            width: 100px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SSE 连接测试工具</h1>
+        
+        <div class="input-group">
+            <label>Authorization:</label>
+            <input type="text" id="tokenInput" placeholder="请输入您的 token (从 localStorage 复制)" />
+        </div>
+        
+        <div>
+            <button id="connectBtn" onclick="connect()">连接 SSE</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>断开连接</button>
+            <button onclick="clearLog()">清空日志</button>
+            <span id="status" class="status disconnected">未连接</span>
+        </div>
+        
+        <div class="log-container" id="logContainer"></div>
+    </div>
+
+    <script>
+        let controller = null;
+        let reader = null;
+        
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            const time = new Date().toLocaleTimeString();
+            entry.textContent = `[${time}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            console.log(`[${type.toUpperCase()}]`, message);
+        }
+        
+        function updateStatus(status, text) {
+            const statusEl = document.getElementById('status');
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = text;
+            
+            document.getElementById('connectBtn').disabled = status === 'connected' || status === 'connecting';
+            document.getElementById('disconnectBtn').disabled = status === 'disconnected';
+        }
+        
+        function clearLog() {
+            document.getElementById('logContainer').innerHTML = '';
+            log('日志已清空', 'info');
+        }
+        
+        async function connect() {
+            const token = document.getElementById('tokenInput').value;
+            
+            if (!token) {
+                alert('请输入 Authorization token！');
+                return;
+            }
+            
+            try {
+                updateStatus('connecting', '连接中...');
+                log('开始建立 SSE 连接...', 'info');
+                
+                controller = new AbortController();
+                
+                const response = await fetch('http://localhost:12345/api/notify/sse', {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': token,
+                        'Accept': 'text/event-stream',
+                    },
+                    signal: controller.signal
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                log(`✅ 连接建立成功！状态码: ${response.status}`, 'success');
+                updateStatus('connected', '已连接');
+                
+                reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        log('⚠️ 连接已关闭', 'error');
+                        updateStatus('disconnected', '已断开');
+                        break;
+                    }
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    log(`📨 收到数据: ${buffer}`, 'info');
+                    
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+                    
+                    let eventName = '';
+                    let eventData = '';
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) {
+                            eventName = line.substring(6).trim();
+                            log(`📌 事件名称: ${eventName}`, 'info');
+                        } else if (line.startsWith('data:')) {
+                            eventData = line.substring(5).trim();
+                            log(`📄 事件数据: ${eventData}`, 'info');
+                        } else if (line === '' && eventData) {
+                            try {
+                                const data = JSON.parse(eventData);
+                                log(`✅ 解析成功: ${JSON.stringify(data, null, 2)}`, 'success');
+                                
+                                if (data.type === 'chart_task_done') {
+                                    log(`🎉 图表任务完成！chartId=${data.chartId}, status=${data.status}`, 'success');
+                                }
+                            } catch (err) {
+                                log(`❌ JSON 解析失败: ${err.message}`, 'error');
+                            }
+                            eventName = '';
+                            eventData = '';
+                        }
+                    }
+                }
+            } catch (error) {
+                if (error.name !== 'AbortError') {
+                    log(`❌ 连接失败: ${error.message}`, 'error');
+                    updateStatus('disconnected', '连接失败');
+                }
+            }
+        }
+        
+        function disconnect() {
+            if (controller) {
+                controller.abort();
+                log('🛑 主动断开连接', 'info');
+                updateStatus('disconnected', '已断开');
+            }
+            if (reader) {
+                reader.cancel();
+            }
+        }
+        
+        // 页面加载时尝试从 localStorage 获取 token
+        window.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('token');
+            if (token) {
+                document.getElementById('tokenInput').value = token;
+                log('✅ 已从 localStorage 自动加载 token', 'success');
+            } else {
+                log('⚠️ 未找到 token，请手动输入', 'info');
+                log('提示：打开主应用页面，按 F12 -> Console，输入: localStorage.getItem("token")', 'info');
+            }
+        });
+    </script>
+</body>
+</html>
+

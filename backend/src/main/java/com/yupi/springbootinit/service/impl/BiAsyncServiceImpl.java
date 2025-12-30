@@ -13,6 +13,10 @@ import com.yupi.springbootinit.model.entity.Chart;
 import com.yupi.springbootinit.model.enums.GenChartStatusEnum;
 import com.yupi.springbootinit.service.BiAsyncService;
 import com.yupi.springbootinit.service.ChartService;
+import com.yupi.springbootinit.service.SseNotifyService;
+import com.yupi.springbootinit.service.cache.ChartCacheService;
+import com.yupi.springbootinit.service.cache.ChartDataCacheService;
+import com.yupi.springbootinit.service.cache.ChartListCacheService;
 import com.yupi.springbootinit.utils.ExcelUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -31,6 +35,14 @@ public class BiAsyncServiceImpl implements BiAsyncService {
     private ChartMapper chartMapper;
     @Resource
     private AiPrompt aiPrompt;
+    @Resource
+    private ChartCacheService chartCacheService;
+    @Resource
+    private ChartListCacheService chartListCacheService;
+    @Resource
+    private ChartDataCacheService chartDataCacheService;
+    @Resource
+    private SseNotifyService sseNotifyService;
 
     // AI 专用线程池 (aiExecutor)：专门“伺候”不稳定的 AI 服务。
     private final ThreadPoolExecutor aiExecutor = new ThreadPoolExecutor(
@@ -103,12 +115,34 @@ public class BiAsyncServiceImpl implements BiAsyncService {
 
             }
 
+            // 7. 删除缓存（写库成功后）
+            evictChartCache(chartId, chart.getUserId());
+
+            // 8. 推送 SSE 通知
+            log.info("【SSE】准备推送任务完成通知: chartId={}, userId={}, status=succeed", chartId, chart.getUserId());
+            sseNotifyService.publishTaskNotification(chart.getUserId(), chartId, "succeed", "图表生成成功");
+            log.info("【SSE】任务完成通知已调用");
+
         } catch (TimeoutException e) {
             log.error("AI生成超时, chartId: {}", chartId);
-            handleChartUpdateError(chartId, "AI生成超时，系统自动终止");
+            String errorMessage = "AI生成超时，系统自动终止";
+            handleChartUpdateError(chartId, errorMessage);
+            // 获取图表信息用于删除缓存和推送通知
+            Chart chart = chartService.getById(chartId);
+            if (chart != null) {
+                evictChartCache(chartId, chart.getUserId());
+                sseNotifyService.publishTaskNotification(chart.getUserId(), chartId, "failed", errorMessage);
+            }
         } catch (Exception e) {
             log.error("AI生成异步任务失败, chartId: {}", chartId, e);
-            handleChartUpdateError(chartId, "执行失败: " + e.getMessage());
+            String errorMessage = "执行失败: " + e.getMessage();
+            handleChartUpdateError(chartId, errorMessage);
+            // 获取图表信息用于删除缓存和推送通知
+            Chart chart = chartService.getById(chartId);
+            if (chart != null) {
+                evictChartCache(chartId, chart.getUserId());
+                sseNotifyService.publishTaskNotification(chart.getUserId(), chartId, "failed", errorMessage);
+            }
         }
     }
 
@@ -123,10 +157,29 @@ public class BiAsyncServiceImpl implements BiAsyncService {
             if(!res){//不会被放到线程池中
                 // 这一步非常重要：如果连报错都写不进去，必须打印 ERROR 日志！
                 log.error("【严重】更新图表FAILED状态失败！可能数据库故障。chartId: {}", chartId);
+            } else {
+                // 删除缓存
+                Chart chart = chartService.getById(chartId);
+                if (chart != null) {
+                    evictChartCache(chartId, chart.getUserId());
+                }
             }
         }catch (Exception e){
             log.error("更新图表失败状态也失败了！可能是数据库挂了。chartId: {}", chartId, e);
         }
 
+    }
+
+    /**
+     * 统一的缓存删除方法
+     */
+    private void evictChartCache(Long chartId, Long userId) {
+        if (chartId != null && chartId > 0) {
+            chartCacheService.evictChart(chartId);
+            chartDataCacheService.evictChartData(chartId);
+        }
+        if (userId != null && userId > 0) {
+            chartListCacheService.evictMyChartList(userId);
+        }
     }
 }

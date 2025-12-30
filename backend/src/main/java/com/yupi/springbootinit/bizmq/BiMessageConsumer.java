@@ -1,33 +1,20 @@
 package com.yupi.springbootinit.bizmq;
 
-import cn.hutool.core.collection.CollUtil;
 import com.rabbitmq.client.Channel;
 import com.yupi.springbootinit.common.ErrorCode;
 import com.yupi.springbootinit.config.RabbitMqConfig;
 import com.yupi.springbootinit.exception.BusinessException;
-import com.yupi.springbootinit.manager.AiPrompt;
-import com.yupi.springbootinit.mapper.ChartMapper;
 import com.yupi.springbootinit.model.entity.Chart;
-import com.yupi.springbootinit.model.enums.GenChartStatusEnum;
 import com.yupi.springbootinit.service.ChartService;
-import com.yupi.springbootinit.utils.ExcelUtils;
-import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.support.AmqpHeaders;
-import org.springframework.dao.DataAccessException;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 @Component
 @Slf4j
@@ -36,9 +23,7 @@ public class BiMessageConsumer {
     @Resource
     private ChartService chartService;
     @Resource
-    private AiPrompt aiPrompt;
-    @Resource
-    private ChartMapper chartMapper;
+    private com.yupi.springbootinit.service.BiAsyncService biAsyncService;
 
     /**
      * 自定义异常：用于标记需要重试的场景
@@ -106,111 +91,17 @@ public class BiMessageConsumer {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图表不存在");
         }
 
-        // --- 2. 更新状态为执行中（可重试） ---
-        // 这里的更新失败通常是数据库连接抖动，建议重试
-        Chart updateChartRunning = new Chart();
-        updateChartRunning.setId(chartId);
-        updateChartRunning.setStatus(GenChartStatusEnum.RUNNING.getValue());
-        boolean b = chartService.updateById(updateChartRunning);
-        if (!b) {
-            throw new RetryableException("更新图表状态为Running失败");
-        }
-
-        // --- 3. 调用 AI 服务 ---
-        String result;
+        // --- 2. 调用 BiAsyncService 来处理完整的图表生成流程 ---
+        // 该服务包含: 状态更新、AI调用、结果保存、缓存删除、SSE通知等完整流程
         try {
-            result = CompletableFuture.supplyAsync(() -> {
-                String csvData = getCsvData(chartId);
-                return aiPrompt.func(chart.getGoal(), chart.getChartType(), csvData);
-            }).get(2, TimeUnit.MINUTES); // 2分钟超时
-        } catch (TimeoutException e) {
-            // A. 超时异常 -> 视为可重试（网络慢等原因）
-            throw new RetryableException("AI生成超时", e);
-        } catch (ExecutionException e) {
-            // B. 执行异常 -> 需要解包看是 AI 内部报错还是什么
-            Throwable cause = e.getCause();
-            if (cause instanceof BusinessException) {
-                // 如果是 BusinessException (如 Key 错误，Prompt 过长)，不可重试
-                throw (BusinessException) cause;
-            }
-            // 其他未知 AI 错误，保守起见视为可重试
-            throw new RetryableException("AI服务调用异常", cause);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RetryableException("线程被中断", e);
-        }
-
-        // --- 4. 解析结果并保存（关键：处理数据过长问题） ---
-        try {
-            handleUpdateSuccess(chartId, result);
-        } catch (DataAccessException e) {
-            // 数据库层面的错误
-            if (e.getMessage() != null && e.getMessage().contains("Data too long")) {
-                // 数据过长，不可重试！直接记录失败原因
-                handleChartUpdateError(chartId, "AI生成的结果过长，无法存入数据库");
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "数据库字段长度不足");
-            }
-            // 其他数据库连接错误，可重试
-            throw new RetryableException("数据库保存异常", e);
+            biAsyncService.executeGenChart(chartId);
+        } catch (BusinessException e) {
+            // 业务异常（不可重试）
+            throw e;
         } catch (Exception e) {
-            // 其他解析错误等
-            if (e instanceof BusinessException) {
-                throw (BusinessException) e;
-            }
-            throw new RetryableException("结果解析或保存未知异常", e);
+            // 其他未知异常，视为可重试
+            log.error("图表生成过程出现异常, chartId: {}", chartId, e);
+            throw new RetryableException("图表生成异常", e);
         }
-    }
-
-    /**
-     * 获取数据（辅助方法）
-     */
-    private String getCsvData(long chartId) {
-        String tableName = "chart_" + chartId;
-        List<Map<String, Object>> chartDataList = chartMapper.queryChartData(tableName);
-        if (CollUtil.isEmpty(chartDataList)) {
-            // 数据没找到，不可重试
-            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图表数据为空");
-        }
-
-        String csvData = ExcelUtils.mapToString(chartDataList);
-        if (StringUtils.isBlank(csvData)) {
-            // 转换失败，不可重试
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "数据转换CSV失败");
-        }
-        return csvData;
-    }
-
-    /**
-     * 处理成功状态
-     */
-    private void handleUpdateSuccess(long chartId, String result) {
-        String[] splits = result.split("【【【【【");
-        if (splits.length < 3) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成格式异常");
-        }
-        String genChart = splits[1].trim().replace("```json", "").replace("```", "").trim();
-        String genResult = splits[2].trim();
-
-        Chart updateChartSuccess = new Chart();
-        updateChartSuccess.setId(chartId);
-        updateChartSuccess.setGenChart(genChart);
-        updateChartSuccess.setGenResult(genResult);
-        updateChartSuccess.setStatus(GenChartStatusEnum.SUCCEED.getValue());
-        boolean update = chartService.updateById(updateChartSuccess);
-        if (!update) {
-            // 如果这里更新返回 false (非异常)，也抛出异常触发重试
-            throw new RuntimeException("更新图表成功状态失败");
-        }
-    }
-
-    /**
-     * 辅助方法：处理失败状态 (用于不可重试场景下，记录具体错误信息)
-     */
-    private void handleChartUpdateError(long chartId, String execMessage) {
-        Chart updateChart = new Chart();
-        updateChart.setId(chartId);
-        updateChart.setStatus(GenChartStatusEnum.FAILED.getValue());
-        updateChart.setExecMessage(execMessage);
-        chartService.updateById(updateChart);
     }
 }

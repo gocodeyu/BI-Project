@@ -1,0 +1,55 @@
+一、 核心风险点：L1 缓存与 SSE 通知的时序冲突（⭐⭐⭐⭐⭐ 必须修正）
+1. 问题描述
+
+你的文档策略：对 GET /chart/get（图表详情）做 L1 Caffeine 缓存，TTL 为 3 分钟。
+
+业务流程：SSE 推送“任务完成” -> 前端收到通知 -> 前端立即请求 GET /chart/get 获取最新图表。
+
+2. 灾难场景演示（多实例部署下）
+
+用户：上传 Excel，前端请求了一次详情，得到 status=WAIT。
+
+Server A：将这个 status=WAIT 存入 本机 Caffeine（TTL 3分钟）。
+
+RabbitMQ 消费者（可能在 Server B）：10秒后跑完任务，更新数据库 status=SUCCEED，并删除了 Redis (L2) 缓存。
+
+SSE：推送“成功”事件给前端。
+
+前端：收到通知，立即再次请求 GET /chart/get。
+
+负载均衡：如果这次请求运气不好，又打到了 Server A。
+
+Server A：查本机 Caffeine，发现 status=WAIT 的缓存还在有效期内（剩 2分50秒），直接返回 WAIT。
+
+后果：用户收到了“成功”的弹窗，激动的点进去，结果页面显示的还是“排队中”。 这种体验比轮询还糟糕，因为它是自相矛盾的。
+
+3. 修正建议 由于你明确了“不引入复杂的延迟双删或广播清除”，针对这个问题有三种解法：
+
+方案 A（最推荐 - 稳健）：对于 GET /chart/get 接口，禁用 L1 Caffeine 缓存，只使用 L2 Redis 缓存。
+
+理由：Redis 是足够快的（单次读取 < 1ms），且是所有节点共享的。消费者删了 Redis，所有节点都能感知到。为了这点性能牺牲一致性不划算。
+
+方案 B（状态分离）：代码逻辑中判断，如果缓存里的状态是 WAIT 或 RUNNING（中间态），视为缓存无效，强制回源查 Redis/DB。只有 SUCCEED（终态）才走 L1 缓存。
+
+方案 C（极短 TTL）：将 L1 的 TTL 设置为 1-2 秒。这样即使读到脏数据，用户刷新一下就好了。但 3 分钟太长了。
+
+二、 SSE 在分布式环境下的实现细节（补充建议）
+文档中提到了 SSE，但没详细说明在多实例下的通信问题。
+
+场景：用户连接在 Server A，任务由 Server B 的消费者处理完成。Server B 想要通过 SSE 推送，但它手里没有用户的 SseEmitter 对象（对象在 Server A 内存里）。
+
+补充设计：需要引入 Redis Pub/Sub（发布订阅）。
+
+Server B 处理完 -> Publish 消息到 Redis Channel（topic:chart-notify）。
+
+所有 Server（A, B, C...）都订阅这个 Channel。
+
+Server A 收到消息 -> 检查本地有没有这个用户的 SSE 连接 -> 有则推送。
+
+三、 列表缓存的策略评估
+文档策略： 列表页缓存 Page 对象，TTL 60秒；写操作时删除对应的 bi:chart:list:my:{userId}:*。
+
+评审：
+
+删除难度大：Redis 的 keys 命令是被禁用的，scan 很难用。要精确删除 bi:chart:list:my:123:* 下的所有分页缓存（p1, p2, p3...）是非常麻烦的。
+对于key重新定义！！！！！

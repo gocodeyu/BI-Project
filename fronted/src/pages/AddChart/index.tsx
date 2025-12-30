@@ -69,6 +69,7 @@ import {
   MenuProps,
   message,
   Modal,
+  notification,
   Pagination,
   Popconfirm,
   Result,
@@ -320,6 +321,360 @@ const AddChart: React.FC = () => {
     }
     if (!isSilent) setListLoading(false);
   };
+
+  // SSE 连接：接收任务完成通知
+  // 使用 useRef 确保在 StrictMode 下只创建一次连接
+  const sseInitializedRef = useRef(false);
+
+  useEffect(() => {
+    // 防止 React StrictMode 导致的重复初始化
+    if (sseInitializedRef.current) {
+      console.log('[SSE] 已初始化，跳过重复创建');
+      return;
+    }
+
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.log('[SSE] 连接跳过：未找到 token');
+      return;
+    }
+
+    sseInitializedRef.current = true;
+    console.log('[SSE] 🚀 开始建立连接...');
+
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let eventSource: EventSource | null = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 10;
+
+    const connectSSE = () => {
+      try {
+        // 构造带 Authorization 的 URL（通过查询参数传递 token）
+        const sseUrl = `http://localhost:12345/api/notify/sse`;
+        
+        console.log(`[SSE] 正在连接 (尝试 ${reconnectAttempts + 1})...`);
+
+        // 注意：EventSource 不支持自定义 headers，需要后端支持 token 查询参数
+        // 或者使用 fetch API，但这里我们先用 fetch API 方式
+        const controller = new AbortController();
+        
+        fetch(sseUrl, {
+          method: 'GET',
+          headers: {
+            'Authorization': token,
+            'Accept': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+          },
+          signal: controller.signal,
+        }).then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          if (!response.body) {
+            throw new Error('Response body is null');
+          }
+
+          console.log('[SSE] ✅ 连接建立成功');
+          message.success('📡 实时通知已开启', 2);
+          reconnectAttempts = 0; // 重置重连计数
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+
+          // 持续读取流
+          const processStream = async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                
+                if (done) {
+                  console.log('[SSE] ⚠️ 流结束，准备重连...');
+                  if (reconnectTimer) clearTimeout(reconnectTimer);
+                  reconnectTimer = setTimeout(connectSSE, 3000);
+                  break;
+                }
+
+                // 解码数据
+                buffer += decoder.decode(value, { stream: true });
+                
+                // 按行处理
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // 保留不完整的行
+
+                let eventName = '';
+                let eventData = '';
+
+                for (const line of lines) {
+                  if (line.startsWith('event:')) {
+                    eventName = line.substring(6).trim();
+                  } else if (line.startsWith('data:')) {
+                    eventData = line.substring(5).trim();
+                  } else if (line === '' && eventData) {
+                    // 空行表示消息结束，处理消息
+                    try {
+                      const data = JSON.parse(eventData);
+                      console.log('[SSE] 📨 收到消息:', eventName, data);
+
+                      // 处理连接建立消息
+                      if (eventName === 'connected' || data.type === 'connected') {
+                        console.log('[SSE] ✅ 服务器确认连接');
+                      }
+
+                      // 处理图表任务完成消息
+                      if (eventName === 'chart_task_done' || data.type === 'chart_task_done') {
+                        const { chartId, status, message: msg, execMessage } = data;
+                        const notificationMsg = msg || execMessage || (status === 'succeed' ? '生成成功' : '生成失败');
+
+                        console.log('[SSE] 📊 图表任务完成:', { chartId, status, notificationMsg });
+
+                        // 获取图表信息以显示图表名称
+                        getChartByIdUsingGet({ id: chartId })
+                          .then((res) => {
+                            const chartData = res.data;
+                            const chartName = chartData?.name || '未命名图表';
+                            const isSuccess = status === 'succeed';
+                            
+                            // 显示美化的通知卡片
+                            notification.open({
+                              message: (
+                                <div style={{ 
+                                  display: 'flex', 
+                                  alignItems: 'center', 
+                                  gap: '10px',
+                                  padding: '4px 0',
+                                }}>
+                                  <img 
+                                    src="/logo.svg" 
+                                    alt="logo" 
+                                    style={{ width: 36, height: 36 }}
+                                  />
+                                  <div>
+                                    <div style={{ 
+                                      fontSize: '15px',
+                                      fontWeight: 600,
+                                      color: '#262626',
+                                      marginBottom: '2px',
+                                      letterSpacing: '0.3px',
+                                    }}>
+                                      智能 BI 平台
+                                    </div>
+                                    <div style={{ 
+                                      fontSize: '12px',
+                                      color: '#8c8c8c',
+                                      fontWeight: 400,
+                                    }}>
+                                      {new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                                    </div>
+                                  </div>
+                                </div>
+                              ),
+                              description: (
+                                <div style={{ 
+                                  marginTop: '12px',
+                                  paddingTop: '12px',
+                                  borderTop: '1px solid #f0f0f0',
+                                }}>
+                                  <div style={{ 
+                                    fontSize: '16px',
+                                    fontWeight: 600,
+                                    color: isSuccess ? '#52c41a' : '#ff4d4f',
+                                    marginBottom: '8px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                  }}>
+                                    <span style={{ 
+                                      fontSize: '18px',
+                                      lineHeight: 1,
+                                    }}>
+                                      {isSuccess ? '✓' : '✗'}
+                                    </span>
+                                    {isSuccess ? '图表生成成功' : '图表生成失败'}
+                                  </div>
+                                  <div style={{ 
+                                    fontSize: '14px',
+                                    color: '#595959',
+                                    lineHeight: '22px',
+                                    background: isSuccess ? '#f6ffed' : '#fff2f0',
+                                    padding: '8px 12px',
+                                    borderRadius: '6px',
+                                    borderLeft: `3px solid ${isSuccess ? '#52c41a' : '#ff4d4f'}`,
+                                  }}>
+                                    <span style={{ fontWeight: 500 }}>分析任务：</span>
+                                    <span style={{ color: '#262626', fontWeight: 600 }}>{chartName}</span>
+                                  </div>
+                                </div>
+                              ),
+                              placement: 'bottomRight',
+                              duration: 10,
+                              onClick: () => loadData(),
+                              style: { 
+                                cursor: 'pointer',
+                                width: 380,
+                                padding: '20px 24px',
+                                borderRadius: '12px',
+                                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08)',
+                                border: isSuccess ? '1px solid #b7eb8f' : '1px solid #ffccc7',
+                              },
+                              className: isSuccess ? 'custom-notification-success' : 'custom-notification-error',
+                            });
+
+                            // 如果正在查看该图表，刷新详情
+                            if (selectedChart?.id === chartId && status === 'succeed' && chartData) {
+                              const opt = fixChartOption(chartData.genChart ?? '{}');
+                              if (!opt.title) opt.title = { text: chartData.name };
+                              setOption(opt);
+                              setSelectedChart(chartData);
+                            }
+                          })
+                          .catch((e) => {
+                            console.error('[SSE] 获取图表信息失败:', e);
+                            const isSuccess = status === 'succeed';
+                            
+                            // 如果获取失败，显示简化版通知
+                            notification.open({
+                              message: (
+                                <div style={{ 
+                                  display: 'flex', 
+                                  alignItems: 'center', 
+                                  gap: '10px',
+                                  padding: '4px 0',
+                                }}>
+                                  <img 
+                                    src="/logo.svg" 
+                                    alt="logo" 
+                                    style={{ width: 36, height: 36 }}
+                                  />
+                                  <div>
+                                    <div style={{ 
+                                      fontSize: '15px',
+                                      fontWeight: 600,
+                                      color: '#262626',
+                                      marginBottom: '2px',
+                                      letterSpacing: '0.3px',
+                                    }}>
+                                      智能 BI 平台
+                                    </div>
+                                    <div style={{ 
+                                      fontSize: '12px',
+                                      color: '#8c8c8c',
+                                      fontWeight: 400,
+                                    }}>
+                                      {new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                                    </div>
+                                  </div>
+                                </div>
+                              ),
+                              description: (
+                                <div style={{ 
+                                  marginTop: '12px',
+                                  paddingTop: '12px',
+                                  borderTop: '1px solid #f0f0f0',
+                                }}>
+                                  <div style={{ 
+                                    fontSize: '16px',
+                                    fontWeight: 600,
+                                    color: isSuccess ? '#52c41a' : '#ff4d4f',
+                                    marginBottom: '8px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                  }}>
+                                    <span style={{ 
+                                      fontSize: '18px',
+                                      lineHeight: 1,
+                                    }}>
+                                      {isSuccess ? '✓' : '✗'}
+                                    </span>
+                                    {isSuccess ? '图表生成成功' : '图表生成失败'}
+                                  </div>
+                                  <div style={{
+                                    marginTop: '10px',
+                                    fontSize: '12px',
+                                    color: '#8c8c8c',
+                                    textAlign: 'center',
+                                    padding: '6px',
+                                    background: '#fafafa',
+                                    borderRadius: '4px',
+                                  }}>
+                                    💡 点击查看详情
+                                  </div>
+                                </div>
+                              ),
+                              placement: 'bottomRight',
+                              duration: 10,
+                              onClick: () => loadData(),
+                              style: { 
+                                cursor: 'pointer',
+                                width: 380,
+                                padding: '20px 24px',
+                                borderRadius: '12px',
+                                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08)',
+                                border: isSuccess ? '1px solid #b7eb8f' : '1px solid #ffccc7',
+                              },
+                            });
+                          });
+
+                        // 刷新列表
+                        loadData();
+                      }
+                    } catch (err) {
+                      console.error('[SSE] ❌ 解析消息失败:', err, '原始数据:', eventData);
+                    }
+                    
+                    // 重置
+                    eventName = '';
+                    eventData = '';
+                  }
+                }
+              }
+            } catch (error: any) {
+              if (error.name !== 'AbortError') {
+                console.error('[SSE] ❌ 读取流错误:', error);
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(connectSSE, 3000);
+              }
+            }
+          };
+
+          processStream();
+        }).catch((error: any) => {
+          if (error.name !== 'AbortError') {
+            console.error('[SSE] ❌ 连接失败:', error);
+            reconnectAttempts++;
+            if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
+              const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // 指数退避
+              console.log(`[SSE] 将在 ${delay}ms 后重连...`);
+              if (reconnectTimer) clearTimeout(reconnectTimer);
+              reconnectTimer = setTimeout(connectSSE, delay);
+            } else {
+              console.error('[SSE] ❌ 达到最大重连次数，停止重连');
+              message.error('实时通知连接失败，请刷新页面重试');
+            }
+          }
+        });
+      } catch (error) {
+        console.error('[SSE] ❌ 创建连接异常:', error);
+      }
+    };
+
+    // 开始连接
+    connectSSE();
+
+    // 清理函数
+    return () => {
+      console.log('[SSE] 🧹 清理连接...');
+      sseInitializedRef.current = false;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      if (eventSource) {
+        eventSource.close();
+      }
+    };
+  }, []); // 只在组件挂载时建立一次连接
 
   useEffect(() => {
     loadData();
@@ -660,7 +1015,12 @@ const AddChart: React.FC = () => {
       } else {
         message.success('分析任务已提交，系统正在处理中...');
         form.resetFields();
+        // 刷新列表，确保新创建的图表能立即显示
         setSearchParams({ ...searchParams, current: 1 });
+        // 延迟一下再刷新，确保后端缓存已删除
+        setTimeout(() => {
+          loadData();
+        }, 500);
         fetchUserInfo();
       }
     } catch (e: any) {

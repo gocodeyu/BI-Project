@@ -93,32 +93,37 @@ public class ChartController {
     @Resource
     private BiMessageProducer biMessageProducer;
 
+    @Resource
+    private com.yupi.springbootinit.service.cache.ChartCacheService chartCacheService;
 
+    @Resource
+    private com.yupi.springbootinit.service.cache.ChartListCacheService chartListCacheService;
+
+    @Resource
+    private com.yupi.springbootinit.service.cache.ChartDataCacheService chartDataCacheService;
 
     private final static Gson GSON = new Gson();
 
-    // region 增删改查
-
     /**
-     * 创建
+     * 统一的缓存删除方法
+     * 删除图表相关的所有缓存：详情、列表、数据预览
      *
-     * @param chartAddRequest
-     * @param request
-     * @return
+     * @param chartId 图表ID
+     * @param userId 用户ID
      */
-    @PostMapping("/add")
-    public BaseResponse<Long> addChart(@RequestBody ChartAddRequest chartAddRequest, HttpServletRequest request) {
-        if (chartAddRequest == null) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+    private void evictChartCache(Long chartId, Long userId) {
+        if (chartId != null && chartId > 0) {
+            // 删除详情缓存
+            chartCacheService.evictChart(chartId);
+            // 删除数据预览缓存
+            chartDataCacheService.evictChartData(chartId);
         }
-        Chart chart = new Chart();
-        BeanUtils.copyProperties(chartAddRequest, chart);
-        User loginUser = userService.getLoginUser(request);
-        chart.setUserId(loginUser.getId());
-        boolean result = chartService.save(chart);
-        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
-        long newChartId = chart.getId();
-        return ResultUtils.success(newChartId);
+        if (userId != null && userId > 0) {
+            // 更新列表缓存版本号（我的图表列表）
+            chartListCacheService.evictMyChartList(userId);
+            // 删除回收站列表缓存
+            chartListCacheService.evictMyDeletedChartList(userId);
+        }
     }
 
     /**
@@ -147,6 +152,10 @@ public class ChartController {
         -- 你调用的是 remove/delete，但实际执行的是：
 UPDATE chart SET is_delete = 1 WHERE id = 10086
          */
+        // 删除缓存
+        if (b) {
+            evictChartCache(id, oldChart.getUserId());
+        }
         return ResultUtils.success(b);
     }
 
@@ -175,6 +184,10 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         ThrowUtils.throwIf(b <= 0, ErrorCode.OPERATION_ERROR);
         String tablename="chart_"+id;
         chartMapper.chartTable(tablename);
+        // 删除缓存
+        if (b > 0) {
+            evictChartCache(id, oldChart.getUserId());
+        }
         return ResultUtils.success(true);
     }
 
@@ -198,24 +211,43 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         Chart oldChart = chartService.getById(id);
         ThrowUtils.throwIf(oldChart == null, ErrorCode.NOT_FOUND_ERROR);
         boolean result = chartService.updateById(chart);
+        // 删除缓存
+        if (result) {
+            evictChartCache(id, oldChart.getUserId());
+        }
         return ResultUtils.success(result);
     }
 
     @PostMapping("/recover")
-    public BaseResponse<Boolean> recoverChart(@RequestBody ChartUpdateRequest chartUpdateRequest) {
+    public BaseResponse<Boolean> recoverChart(@RequestBody ChartUpdateRequest chartUpdateRequest, HttpServletRequest request) {
         if (chartUpdateRequest == null || chartUpdateRequest.getId() <= 0) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
-        long id=chartUpdateRequest.getId();
-        boolean result=chartMapper.recoverChart(id);
-        if(!result)
-        ThrowUtils.throwIf(!result, ErrorCode.NOT_FOUND_ERROR, "图表不存在或无需恢复");
+        User loginUser = userService.getLoginUser(request);
+        long id = chartUpdateRequest.getId();
+        
+        // 使用 chartMapper.getById 查询（自定义 XML SQL 不受逻辑删除拦截，可以查询到 isDelete=1 的数据）
+        Chart oldChart = chartMapper.getById(id);
+        ThrowUtils.throwIf(oldChart == null, ErrorCode.NOT_FOUND_ERROR);
+        
+        // 仅本人或管理员可恢复
+        if (!oldChart.getUserId().equals(loginUser.getId()) && !userService.isAdmin(request)) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
+        }
+        
+        // 执行恢复操作
+        boolean result = chartMapper.recoverChart(id);
+        ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR, "恢复失败");
 
+        // 删除缓存
+        evictChartCache(id, oldChart.getUserId());
+        
         return ResultUtils.success(true);
     }
 
     /**
      * 根据 id 获取（包含完整信息）
+     * 使用缓存：Redis + DB（不使用 Caffeine，避免与 SSE 冲突）
      *
      * @param id
      * @param request
@@ -227,7 +259,9 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         User loginUser = userService.getLoginUser(request);
-        Chart chart = chartService.getById(id);
+        
+        // 使用缓存服务获取（Redis + DB）
+        Chart chart = chartCacheService.getChartByIdWithCache(id);
         if (chart == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR);
         }
@@ -239,26 +273,8 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
     }
 
     /**
-     * 分页获取列表（封装类）
-     *
-     * @param chartQueryRequest
-     * @param request
-     * @return
-     */
-    @PostMapping("/list/page")
-    public BaseResponse<Page<Chart>> listChartByPage(@RequestBody ChartQueryRequest chartQueryRequest,
-                                                     HttpServletRequest request) {
-        long current = chartQueryRequest.getCurrent();
-        long size = chartQueryRequest.getPageSize();
-        // 限制爬虫
-        ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
-        Page<Chart> chartPage = chartService.page(new Page<>(current, size),
-                getQueryWrapper(chartQueryRequest));
-        return ResultUtils.success(chartPage);
-    }
-
-    /**
      * 分页获取当前用户创建的资源列表
+     * 使用缓存：Caffeine → Redis → DB（仅对简单条件缓存）
      *
      * @param chartQueryRequest
      * @param request
@@ -272,24 +288,18 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         }
         User loginUser = userService.getLoginUser(request);
         chartQueryRequest.setUserId(loginUser.getId());
-        long current = chartQueryRequest.getCurrent();//当前页号
-        long size = chartQueryRequest.getPageSize();//页面大小
+        long size = chartQueryRequest.getPageSize();
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
-        Page<Chart> chartPage = chartService.page(new Page<>(current, size),
-                getQueryWrapper(chartQueryRequest));
         
-        // 转换为 ChartListVO，排除大字段
-        Page<ChartListVO> chartListVOPage = new Page<>(chartPage.getCurrent(), chartPage.getSize(), chartPage.getTotal());
-        List<ChartListVO> chartListVOList = chartPage.getRecords().stream()
-                .map(ChartListVO::objToVo)
-                .collect(java.util.stream.Collectors.toList());
-        chartListVOPage.setRecords(chartListVOList);
+        // 使用缓存服务获取（Caffeine → Redis → DB）
+        Page<ChartListVO> chartListVOPage = chartListCacheService.getMyChartListWithCache(chartQueryRequest);
         
         return ResultUtils.success(chartListVOPage);
     }
     /**
-     * 分页获取当前用户创建的资源列表
+     * 分页获取当前用户创建的资源列表（回收站）
+     * 使用缓存：Redis → DB
      *
      * @param chartQueryRequest
      * @param request
@@ -303,59 +313,13 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         }
         User loginUser = userService.getLoginUser(request);
         chartQueryRequest.setUserId(loginUser.getId());
-        long current = chartQueryRequest.getCurrent();//当前页号
-        long size = chartQueryRequest.getPageSize();//页面大小
+        long size = chartQueryRequest.getPageSize();
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
-        Page<Chart> chartPage = new Page<>(current, size);
-        chartPage = chartService.listMyDeletedChartByPage(chartPage, chartQueryRequest);
+        
+        // 使用缓存服务获取（Redis → DB）
+        Page<Chart> chartPage = chartListCacheService.getMyDeletedChartListWithCache(chartQueryRequest);
         return ResultUtils.success(chartPage);
-    }
-
-    /**
-     * 对于fail的状态重试
-     */
-    @PostMapping("/gen/retry")
-    public BaseResponse<Boolean> retryChart(@RequestBody ChartReloadRequest reloadRequest, HttpServletRequest request) {
-        if (reloadRequest == null || reloadRequest.getId() <= 0) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR);
-        }
-        User loginUser = userService.getLoginUser(request);
-        long chartId = reloadRequest.getId();
-
-        // 1. 校验图表是否存在
-        Chart chart = chartService.getById(chartId);
-        ThrowUtils.throwIf(chart == null, ErrorCode.NOT_FOUND_ERROR);
-        // 2. 校验权限（仅本人或管理员可重试）
-        if (!chart.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
-        }
-        // 3. 限流校验
-        redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
-        redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
-
-        //4. 更新表格状态
-        Chart updateChart = new Chart();
-        updateChart.setId(chartId);
-        updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        updateChart.setExecMessage("");
-        boolean update = chartService.updateById(updateChart);
-        if(!update){
-            log.error("更新图表状态失败, chartId: {}", chartId);
-            throw new BusinessException(ErrorCode.OPERATION_ERROR);
-        }
-        //5. 异步提交任务
-        try{
-            CompletableFuture.runAsync(() -> {
-                biAsyncService.executeGenChart(chartId);
-            }, threadPoolExecutor);
-        }catch (Exception e){
-            log.error("提交任务失败, chartId: {}", chartId, e);
-            handleChartUpdateError(chartId, "系统繁忙，重试提交失败");
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统繁忙，请稍后再试");
-        }
-
-        return ResultUtils.success(true);
     }
     /**
      * 对于fail的状态重试
@@ -388,6 +352,10 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         if(!update){
             log.error("更新图表状态失败, chartId: {}", chartId);
             throw new BusinessException(ErrorCode.OPERATION_ERROR);
+        }
+        // 删除缓存
+        if (update) {
+            evictChartCache(chartId, chart.getUserId());
         }
         //5. 异步提交任务
         boolean isVip = "vip".equals(loginUser.getUserRole()); // 假设 UserRole 字段存在
@@ -434,6 +402,10 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         if (!needRegen) {
             boolean result = chartService.updateById(chart);
             ThrowUtils.throwIf(!result, ErrorCode.SYSTEM_ERROR, "更新图表失败");
+            // 删除缓存
+            if (result) {
+                evictChartCache(id, oldChart.getUserId());
+            }
 
             BiResponse biResponse = new BiResponse();
             biResponse.setChartId(id);
@@ -463,103 +435,14 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         chart.setStatus(GenChartStatusEnum.WAIT.getValue());
         boolean saveResult = chartService.updateById(chart);
         ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "更新图表状态失败");
+        // 删除缓存
+        if (saveResult) {
+            evictChartCache(id, oldChart.getUserId());
+        }
 
         // 5. 开启异步任务
         boolean isVip= "vip".equals(loginUser.getUserRole());
         biMessageProducer.sendMessage(String.valueOf(id), isVip);
-
-        // 6. 立即返回前端
-        BiResponse biResponse = new BiResponse();
-        biResponse.setChartId(id);
-        biResponse.setGenResult("分析任务已提交，请稍后在“我的图表”查看结果");
-        return ResultUtils.success(biResponse);
-    }
-
-    /**
-     * 编辑（用户）
-     *
-     * @param chartEditRequest
-     * @param request
-     * @return
-     */
-    @PostMapping("/edit")
-    public BaseResponse<BiResponse> editChart(@RequestBody ChartEditRequest chartEditRequest, HttpServletRequest request) {
-        if (chartEditRequest == null || chartEditRequest.getId() <= 0) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR);
-        }
-
-        // 1. 实体转换
-        Chart chart = new Chart();
-        BeanUtils.copyProperties(chartEditRequest, chart);
-        User loginUser = userService.getLoginUser(request);
-        long id = chartEditRequest.getId();
-
-        // 2. 校验权限
-        Chart oldChart = chartService.getById(id);
-        ThrowUtils.throwIf(oldChart == null, ErrorCode.NOT_FOUND_ERROR);
-        if (!oldChart.getUserId().equals(loginUser.getId()) && !userService.isAdmin(loginUser)) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
-        }
-
-        // 3. 判断是否需要 AI 重新生成
-        String newGoal = chart.getGoal();
-        String oldGoal = oldChart.getGoal();
-        String newChartType = chart.getChartType();
-        String oldChartType = oldChart.getChartType();
-
-        boolean needRegen = (StringUtils.isNotBlank(newGoal) && !newGoal.equals(oldGoal)) ||
-                (StringUtils.isNotBlank(newChartType) && !newChartType.equals(oldChartType));
-
-        // A. 场景：不需要 AI 重新生成，直接更新元数据
-        if (!needRegen) {
-            boolean result = chartService.updateById(chart);
-            ThrowUtils.throwIf(!result, ErrorCode.SYSTEM_ERROR, "更新图表失败");
-
-            BiResponse biResponse = new BiResponse();
-            biResponse.setChartId(id);
-            biResponse.setGenChart(oldChart.getGenChart());
-            biResponse.setGenResult(oldChart.getGenResult());
-            return ResultUtils.success(biResponse);
-        }
-
-        // B. 场景：需要 AI 重新生成
-        String tableName = "chart_" + id;
-        List<Map<String, Object>> chartDataList = chartMapper.queryChartData(tableName);
-        if (CollUtil.isEmpty(chartDataList)) {
-            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图表数据不存在");
-        }
-
-        String csvData = ExcelUtils.mapToString(chartDataList);
-        if (StringUtils.isBlank(csvData)) {
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "原图表数据丢失，无法重新生成");
-        }
-
-        // 限流校验
-        redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
-        redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
-
-        // 4. 更新数据库状态为 WAIT (主线程)
-        // 这里的 chart 包含了用户修改的新 name, goal, type
-        chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        boolean saveResult = chartService.updateById(chart);
-        ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "更新图表状态失败");
-
-        // 5. 开启异步任务
-        try {
-            CompletableFuture.runAsync(() -> {
-                /*
-                biAsyncService.executeGenChart(id) 本身只是一个普通的 Java 方法调用。
-
-外层的 CompletableFuture.runAsync 是为了把这个耗时的方法调用从 Tomcat 的 HTTP 响应线程中剥离出来，
-扔到后台去跑，从而实现**“接口立即响应，任务后台处理”**的效果。
-                 */
-                biAsyncService.executeGenChart(id);
-            }, threadPoolExecutor);
-
-        } catch (Exception e) {
-            log.error("图表生成异步任务提交失败, chartId: {}", id, e);
-            handleChartUpdateError(id, "系统繁忙，任务提交失败");
-        }
 
         // 6. 立即返回前端
         BiResponse biResponse = new BiResponse();
@@ -648,10 +531,13 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         boolean isVip= "vip".equals(loginUser.getUserRole());
         biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
 
+        // 删除列表缓存，确保新创建的图表能立即显示在列表中
+        evictChartCache(null, loginUser.getId());
+
         //5、立即返回给前端信息，不等AI分析结束
         BiResponse biResponse = new BiResponse();
         biResponse.setChartId(chartId);
-        biResponse.setGenResult("分析任务已提交，请稍后在“我的图表”查看结果");
+        biResponse.setGenResult("分析任务已提交，请稍后在\"我的图表\"查看结果");
         return ResultUtils.success(biResponse);
 
     }
@@ -693,103 +579,6 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
     }
 
     /**
-     * 智能分析（异步模式）
-     *
-     */
-    @PostMapping("/gen/async")
-    public BaseResponse<BiResponse> genChartByAiAsync(@RequestPart("file") MultipartFile multipartFile,
-                                                 GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws FileNotFoundException {
-        String name = genChartByAiRequest.getName();
-        String goal = genChartByAiRequest.getGoal();
-        String chartType = genChartByAiRequest.getChartType();
-        User loginUser = userService.getLoginUser(request);
-
-        // 1. 校验
-        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "分析目标为空");
-        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
-        // 校验文件
-        long size = multipartFile.getSize();
-        String originalFilename = multipartFile.getOriginalFilename();
-        // 校验文件大小 (例如 1MB)
-        final long ONE_MB = 1024 * 1024L;
-        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1MB");
-        // 校验文件后缀
-        String suffix = FileUtil.getSuffix(originalFilename);
-        final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
-        ThrowUtils.throwIf(!validFileSuffixList.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
-
-        // 2.限流校验
-        //全局频率限流：每个用户每秒只能请求 2 次
-        redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
-        //每日额度限流：会员 50 次，非会员 3 次
-        redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
-
-        //3. 先读取 Excel 为原始 List 结构
-        List<Map<Integer, String>> rawDataList = ExcelUtils.readExcel(multipartFile);
-        if(CollUtil.isEmpty(rawDataList)){
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
-        }
-
-        List<String> headers = ExcelUtils.getHeaders(rawDataList);
-        //数据清洗：处理表头
-        // 防止表头为空或包含特殊字符导致建表失败
-        // 如果表头为空，给一个默认名字，例如 "col_0", "col_1"
-        for (int i = 0; i < headers.size(); i++) {
-            if (StringUtils.isBlank(headers.get(i))) {
-                headers.set(i, "col_" + i);
-            } else {
-                // 简单的防注入过滤，只保留中文、字母、数字、下划线
-                // headers.set(i, headers.get(i).replaceAll("[^a-zA-Z0-9_\\u4e00-\\u9fa5]", ""));
-                // MyBatis XML 中使用了反引号包裹列名，所以空格等特殊字符其实是可以支持的，这里去重空格即可
-                headers.set(i, headers.get(i).trim());
-            }
-        }
-        List<List<Object>> dataRows = ExcelUtils.getDataList(rawDataList);
-        //3、保存到数据库
-        Chart chart = new Chart();
-        chart.setName(name);
-        chart.setGoal(goal);
-        chart.setChartData("数据存储在分表：chart_" + System.currentTimeMillis());
-        chart.setChartType(chartType);
-        chart.setUserId(loginUser.getId());
-        chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        boolean saveResult = chartService.save(chart);
-        if(!saveResult){
-            log.error("保存图表失败");
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "保存图表失败");
-
-        }
-
-        long chartId = chart.getId();
-        String tableName = "chart_" + chartId;
-        chartMapper.createChartTable(tableName, headers);
-        if (CollUtil.isNotEmpty(dataRows)) {
-            int batchSize = 1000;
-            for (int i = 0; i < dataRows.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, dataRows.size());
-                chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
-            }
-        }
-
-        // 4. 请求任务保存到线程池中
-        try {
-            CompletableFuture.runAsync(() -> {
-               biAsyncService.executeGenChart(chartId);
-            }, threadPoolExecutor);
-        } catch (Exception e) {
-            // 如果提交任务到线程池就失败了（例如队列满了 RejectedExecutionException）
-            log.error("提交分析任务失败，队列已满: {}", e.getMessage());
-            // 优化点2配套：标记为"系统繁忙"，方便定时任务捞起来重试
-            handleChartUpdateError(chartId, "系统繁忙，请稍后再试（任务已加入重试队列）");
-        }
-        //5、立即返回给前端信息，不等AI分析结束
-        BiResponse biResponse = new BiResponse();
-        biResponse.setChartId(chartId);
-        biResponse.setGenResult("分析任务已提交，请稍后在“我的图表”查看结果");
-        return ResultUtils.success(biResponse);
-
-    }
-    /**
      * 辅助方法：处理失败状态
      */
     private void handleChartUpdateError(long chartId, String execMessage) {
@@ -800,132 +589,10 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         chartService.updateById(updateChart);
     }
 
-    /**
-         * 智能分析（同步模式）
-         *
-         * @param multipartFile
-         * @param genChartByAiRequest
-         * @param request
-         * @return
-         */
-        @PostMapping("/gen")
-        public BaseResponse<BiResponse> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
-                                                     GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) throws FileNotFoundException {
-            String name = genChartByAiRequest.getName();
-            String goal = genChartByAiRequest.getGoal();
-            String chartType = genChartByAiRequest.getChartType();
-            User loginUser = userService.getLoginUser(request);
-
-            // 1. 校验
-            ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "分析目标为空");
-            ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
-            // 校验文件
-            long size = multipartFile.getSize();
-            String originalFilename = multipartFile.getOriginalFilename();
-            // 校验文件大小 (例如 1MB)
-            final long ONE_MB = 1024 * 1024L;
-            ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1MB");
-            // 校验文件后缀
-            String suffix = FileUtil.getSuffix(originalFilename);
-            final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
-            ThrowUtils.throwIf(!validFileSuffixList.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
-
-            // 2.限流校验
-            //全局频率限流：每个用户每秒只能请求 2 次
-            redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
-            //每日额度限流：会员 50 次，非会员 3 次
-            redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
-
-            //3. 先读取 Excel 为原始 List 结构
-            List<Map<Integer, String>> rawDataList = ExcelUtils.readExcel(multipartFile);
-            if(CollUtil.isEmpty(rawDataList)){
-                throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
-            }
-
-            // 转换为 CSV 字符串（给 AI 用）
-            String csvData = ExcelUtils.convertListToCsv(rawDataList);
-
-            List<String> headers = ExcelUtils.getHeaders(rawDataList);
-            //数据清洗：处理表头
-            // 防止表头为空或包含特殊字符导致建表失败
-            // 如果表头为空，给一个默认名字，例如 "col_0", "col_1"
-            for (int i = 0; i < headers.size(); i++) {
-                if (StringUtils.isBlank(headers.get(i))) {
-                    headers.set(i, "col_" + i);
-                } else {
-                    // 简单的防注入过滤，只保留中文、字母、数字、下划线
-                    // headers.set(i, headers.get(i).replaceAll("[^a-zA-Z0-9_\\u4e00-\\u9fa5]", ""));
-                    // MyBatis XML 中使用了反引号包裹列名，所以空格等特殊字符其实是可以支持的，这里去重空格即可
-                    headers.set(i, headers.get(i).trim());
-                }
-            }
-            List<List<Object>> dataRows = ExcelUtils.getDataList(rawDataList);
-
-
-
-            // 3. 调用 AI
-            // 使用新的 doChat 方法，传入 system prompt 和 user message
-            String result = aiPrompt.func(goal,chartType,csvData);
-
-            // 4. 解析结果
-            String[] splits = result.split("【【【【【");
-            if (splits.length < 3) {
-                log.error("AI 生成格式错误，返回内容：{}", result);
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成格式异常，请稍后重试");
-            }
-
-            String genChart = splits[1].trim();
-            String genResult = splits[2].trim();
-
-            // 清理一下可能的 Markdown 代码块标记 (兼容性处理)
-            genChart = genChart.replace("```json", "").replace("```", "").trim();
-
-            // 5. 保存到数据库
-            Chart chart = new Chart();
-            chart.setName(name);
-            chart.setGoal(goal);
-            chart.setChartData("数据存储在分表：chart_" + System.currentTimeMillis());
-            chart.setChartType(chartType);
-            chart.setGenChart(genChart);
-            chart.setGenResult(genResult);
-            chart.setUserId(loginUser.getId());
-            boolean saveResult = chartService.save(chart);
-            ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "图表保存失败");
-
-            //6. 动态创建chart_{id}表
-            Long chartId = chart.getId();
-            String tableName = "chart_" + chartId;
-            try {
-                // 6.1 创建表：create table chart_1 (id..., date..., num...)
-                chartMapper.createChartTable(tableName, headers);
-
-                // 6.2 插入数据：分批插入，防止 SQL 过长报错
-                if (CollUtil.isNotEmpty(dataRows)) {
-                    int batchSize = 1000; // 每批插入 1000 条
-                    int totalRows = dataRows.size();
-                    for (int i = 0; i < totalRows; i += batchSize) {
-                        int end = Math.min(i + batchSize, totalRows);
-                        List<List<Object>> subList = dataRows.subList(i, end);
-                        // 执行插入
-                        chartMapper.insertChartData(tableName, headers, subList);
-                    }
-                }
-            } catch (Exception e) {
-                log.error("分表创建或数据插入失败，chartId: {}", chartId, e);
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "数据存储失败，请检查表头格式");
-            }
-
-            // 7. 返回结果
-            BiResponse biResponse = new BiResponse();
-            biResponse.setGenChart(genChart);
-            biResponse.setGenResult(genResult);
-            biResponse.setChartId(chart.getId());
-            return ResultUtils.success(biResponse);
-        }
-    
 
     /**
      * 预览图表数据
+     * 使用缓存：Caffeine → Redis → DB（仅缓存前 3 页和常用 pageSize）
      *
      * @param chartDataPreviewRequest
      * @param request
@@ -950,42 +617,11 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
         }
         
-        // 3. 查询数据
-        String tableName = "chart_" + chartId;
+        // 3. 使用缓存服务获取数据（Caffeine → Redis → DB）
         long current = chartDataPreviewRequest.getCurrent();
         long pageSize = chartDataPreviewRequest.getPageSize();
-        long offset = (current - 1) * pageSize;
+        ChartDataPreviewResponse response = chartDataCacheService.getChartDataPreviewWithCache(chartId, current, pageSize);
         
-        // 查询总记录数
-        long total = chartMapper.countChartData(tableName);
-        
-        // 查询分页数据
-        List<Map<String, Object>> dataList = chartMapper.queryChartDataWithPage(tableName, offset, pageSize);
-        
-        // 4. 构建返回结果
-        ChartDataPreviewResponse response = new ChartDataPreviewResponse();
-        
-        // 获取表头（排除id列）
-        if (!dataList.isEmpty()) {
-            Map<String, Object> firstRow = dataList.get(0);
-            List<String> headers = firstRow.keySet().stream()
-                    .filter(key -> !"id".equals(key))
-                    .collect(java.util.stream.Collectors.toList());
-            response.setHeaders(headers);
-            
-            // 转换数据
-            List<List<String>> data = dataList.stream()
-                    .map(row -> headers.stream()
-                            .map(header -> String.valueOf(row.get(header)))
-                            .collect(java.util.stream.Collectors.toList()))
-                    .collect(java.util.stream.Collectors.toList());
-            response.setData(data);
-        } else {
-            response.setHeaders(new ArrayList<>());
-            response.setData(new ArrayList<>());
-        }
-        
-        response.setTotal(total);
         return ResultUtils.success(response);
     }
 }
