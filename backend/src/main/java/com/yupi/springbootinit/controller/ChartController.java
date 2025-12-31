@@ -328,6 +328,7 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
     }
     /**
      * 对于fail的状态重试
+     * 使用分布式锁防止重复提交
      */
     @PostMapping("/gen/retry/rabbitmq")
     public BaseResponse<Boolean> retryChartRabbitmq(@RequestBody ChartReloadRequest reloadRequest, HttpServletRequest request) {
@@ -348,28 +349,61 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
         redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
 
-        //4. 更新表格状态
-        Chart updateChart = new Chart();
-        updateChart.setId(chartId);
-        updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        updateChart.setExecMessage("");
-        boolean update = chartService.updateById(updateChart);
-        if(!update){
-            log.error("更新图表状态失败, chartId: {}", chartId);
-            throw new BusinessException(ErrorCode.OPERATION_ERROR);
-        }
-        // 删除缓存
-        if (update) {
-            evictChartCache(chartId, chart.getUserId());
-        }
-        //5. 异步提交任务
-        boolean isVip = "vip".equals(loginUser.getUserRole()); // 假设 UserRole 字段存在
-        biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
+        // 4. 构造分布式锁的 Key
+        // 格式: chart:retry:userId:chartId
+        String lockKey = "chart:retry:" + loginUser.getId() + ":" + chartId;
+        log.info("尝试获取分布式锁: lockKey={}, userId={}, chartId={}", lockKey, loginUser.getId(), chartId);
 
-        return ResultUtils.success(true);
+        // 5. 使用分布式锁包装业务逻辑
+        try {
+            Boolean result = distributedLockService.executeWithLock(
+                lockKey,
+                0,  // waitTime: 0 秒，不等待，立即失败
+                10, // leaseTime: 10 秒后自动释放锁（防止死锁）
+                () -> {
+                    // 更新表格状态
+                    Chart updateChart = new Chart();
+                    updateChart.setId(chartId);
+                    updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
+                    updateChart.setExecMessage("");
+                    boolean update = chartService.updateById(updateChart);
+                    if(!update){
+                        log.error("更新图表状态失败, chartId: {}", chartId);
+                        throw new BusinessException(ErrorCode.OPERATION_ERROR);
+                    }
+                    // 删除缓存
+                    evictChartCache(chartId, chart.getUserId());
+                    
+                    // 异步提交任务
+                    boolean isVip = "vip".equals(loginUser.getUserRole());
+                    biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
+                    
+                    return true;
+                }
+            );
+
+            return ResultUtils.success(result);
+
+        } catch (BusinessException e) {
+            // 如果是分布式锁获取失败（重复提交），需要回退限流次数
+            if (e.getMessage() != null && e.getMessage().contains("重复提交")) {
+                log.warn("检测到重复提交，回退限流次数: userId={}, lockKey={}", loginUser.getId(), lockKey);
+                redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+                log.info("已成功回退限流次数: userId={}, 当前剩余次数={}",
+                    loginUser.getId(),
+                    redisLimiterManager.getRemainingPermits(loginUser.getId(), loginUser.getUserRole()));
+            }
+            throw e;
+        } catch (Exception e) {
+            log.error("重试任务失败", e);
+            // 其他异常也回退限流次数
+            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "重试任务失败：" + e.getMessage());
+        }
     }
     /**
      * 编辑（用户）
+     * 使用分布式锁防止重复提交
      *
      * @param chartEditRequest
      * @param request
@@ -435,25 +469,56 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
         redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
 
-        // 4. 更新数据库状态为 WAIT (主线程)
-        // 这里的 chart 包含了用户修改的新 name, goal, type
-        chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        boolean saveResult = chartService.updateById(chart);
-        ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "更新图表状态失败");
-        // 删除缓存
-        if (saveResult) {
-            evictChartCache(id, oldChart.getUserId());
+        // 4. 构造分布式锁的 Key
+        // 格式: chart:edit:userId:chartId:md5(goal + chartType)
+        String requestId = HashUtils.generateRequestId(String.valueOf(id), newGoal, newChartType);
+        String lockKey = "chart:edit:" + loginUser.getId() + ":" + requestId;
+        log.info("尝试获取分布式锁: lockKey={}, userId={}, chartId={}", lockKey, loginUser.getId(), id);
+
+        // 5. 使用分布式锁包装业务逻辑
+        try {
+            BiResponse biResponse = distributedLockService.executeWithLock(
+                lockKey,
+                0,  // waitTime: 0 秒，不等待，立即失败
+                10, // leaseTime: 10 秒后自动释放锁（防止死锁）
+                () -> {
+                    // 更新数据库状态为 WAIT
+                    chart.setStatus(GenChartStatusEnum.WAIT.getValue());
+                    boolean saveResult = chartService.updateById(chart);
+                    ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "更新图表状态失败");
+                    // 删除缓存
+                    evictChartCache(id, oldChart.getUserId());
+
+                    // 开启异步任务
+                    boolean isVip = "vip".equals(loginUser.getUserRole());
+                    biMessageProducer.sendMessage(String.valueOf(id), isVip);
+
+                    // 立即返回前端
+                    BiResponse response = new BiResponse();
+                    response.setChartId(id);
+                    response.setGenResult("分析任务已提交，请稍后在\"我的图表\"查看结果");
+                    return response;
+                }
+            );
+
+            return ResultUtils.success(biResponse);
+
+        } catch (BusinessException e) {
+            // 如果是分布式锁获取失败（重复提交），需要回退限流次数
+            if (e.getMessage() != null && e.getMessage().contains("重复提交")) {
+                log.warn("检测到重复提交，回退限流次数: userId={}, lockKey={}", loginUser.getId(), lockKey);
+                redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+                log.info("已成功回退限流次数: userId={}, 当前剩余次数={}",
+                    loginUser.getId(),
+                    redisLimiterManager.getRemainingPermits(loginUser.getId(), loginUser.getUserRole()));
+            }
+            throw e;
+        } catch (Exception e) {
+            log.error("编辑任务失败", e);
+            // 其他异常也回退限流次数
+            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "编辑任务失败：" + e.getMessage());
         }
-
-        // 5. 开启异步任务
-        boolean isVip= "vip".equals(loginUser.getUserRole());
-        biMessageProducer.sendMessage(String.valueOf(id), isVip);
-
-        // 6. 立即返回前端
-        BiResponse biResponse = new BiResponse();
-        biResponse.setChartId(id);
-        biResponse.setGenResult("分析任务已提交，请稍后在“我的图表”查看结果");
-        return ResultUtils.success(biResponse);
     }
 
     /**
