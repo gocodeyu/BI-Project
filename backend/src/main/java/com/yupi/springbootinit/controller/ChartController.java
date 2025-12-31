@@ -34,8 +34,10 @@ import com.yupi.springbootinit.model.vo.ChartDataPreviewResponse;
 import com.yupi.springbootinit.model.vo.ChartListVO;
 import com.yupi.springbootinit.service.BiAsyncService;
 import com.yupi.springbootinit.service.ChartService;
+import com.yupi.springbootinit.service.DistributedLockService;
 import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
+import com.yupi.springbootinit.utils.HashUtils;
 import com.yupi.springbootinit.utils.SqlUtils;
 import io.reactivex.rxjava3.core.Completable;
 import lombok.extern.slf4j.Slf4j;
@@ -101,6 +103,9 @@ public class ChartController {
 
     @Resource
     private com.yupi.springbootinit.service.cache.ChartDataCacheService chartDataCacheService;
+
+    @Resource
+    private DistributedLockService distributedLockService;
 
     private final static Gson GSON = new Gson();
 
@@ -453,6 +458,7 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
 
     /**
      * 智能分析（异步+rabbitmq模式）
+     * 使用分布式锁防止重复提交
      *
      */
     @PostMapping("/gen/async/rabbitmq")
@@ -486,60 +492,110 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         //3. 先读取 Excel 为原始 List 结构
         List<Map<Integer, String>> rawDataList = ExcelUtils.readExcel(multipartFile);
         if(CollUtil.isEmpty(rawDataList)){
+            // 数据为空，回退限流次数
+            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
         }
+        
+        // 4. 生成文件内容的唯一标识（用于防重复提交）
+        // 读取文件字节内容
+        String fileContentHash;
+        try {
+            byte[] fileBytes = multipartFile.getBytes();
+            fileContentHash = HashUtils.md5(new String(fileBytes));
+        } catch (Exception e) {
+            log.error("读取文件内容失败", e);
+            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "文件读取失败");
+        }
+        
+        // 5. 构造分布式锁的 Key
+        // 格式: chart:gen:userId:md5(fileContent + goal + chartType)
+        String requestId = HashUtils.generateRequestId(fileContentHash, goal, chartType);
+        String lockKey = "chart:gen:" + loginUser.getId() + ":" + requestId;
+        
+        log.info("尝试获取分布式锁: lockKey={}, userId={}", lockKey, loginUser.getId());
+        
+        // 6. 使用分布式锁包装业务逻辑
+        try {
+            BiResponse biResponse = distributedLockService.executeWithLock(
+                lockKey, 
+                0,  // waitTime: 0 秒，不等待，立即失败
+                10, // leaseTime: 10 秒后自动释放锁（防止死锁）
+                () -> {
+                    // 业务逻辑开始
+                    List<String> headers = ExcelUtils.getHeaders(rawDataList);
+                    //数据清洗：处理表头
+                    // 防止表头为空或包含特殊字符导致建表失败
+                    // 如果表头为空，给一个默认名字，例如 "col_0", "col_1"
+                    for (int i = 0; i < headers.size(); i++) {
+                        if (StringUtils.isBlank(headers.get(i))) {
+                            headers.set(i, "col_" + i);
+                        } else {
+                            // 简单的防注入过滤，只保留中文、字母、数字、下划线
+                            // headers.set(i, headers.get(i).replaceAll("[^a-zA-Z0-9_\\u4e00-\\u9fa5]", ""));
+                            // MyBatis XML 中使用了反引号包裹列名，所以空格等特殊字符其实是可以支持的，这里去重空格即可
+                            headers.set(i, headers.get(i).trim());
+                        }
+                    }
+                    List<List<Object>> dataRows = ExcelUtils.getDataList(rawDataList);
+                    
+                    // 保存到数据库
+                    Chart chart = new Chart();
+                    chart.setName(name);
+                    chart.setGoal(goal);
+                    chart.setChartType(chartType);
+                    chart.setUserId(loginUser.getId());
+                    chart.setStatus(GenChartStatusEnum.WAIT.getValue());
+                    boolean saveResult = chartService.createChart(chart);
+                    if(!saveResult){
+                        log.error("保存图表失败");
+                        throw new BusinessException(ErrorCode.SYSTEM_ERROR, "保存图表失败");
+                    }
 
-        List<String> headers = ExcelUtils.getHeaders(rawDataList);
-        //数据清洗：处理表头
-        // 防止表头为空或包含特殊字符导致建表失败
-        // 如果表头为空，给一个默认名字，例如 "col_0", "col_1"
-        for (int i = 0; i < headers.size(); i++) {
-            if (StringUtils.isBlank(headers.get(i))) {
-                headers.set(i, "col_" + i);
-            } else {
-                // 简单的防注入过滤，只保留中文、字母、数字、下划线
-                // headers.set(i, headers.get(i).replaceAll("[^a-zA-Z0-9_\\u4e00-\\u9fa5]", ""));
-                // MyBatis XML 中使用了反引号包裹列名，所以空格等特殊字符其实是可以支持的，这里去重空格即可
-                headers.set(i, headers.get(i).trim());
+                    long chartId = chart.getId();
+                    String tableName = "chart_" + chartId;
+                    chartMapper.createChartTable(tableName, headers);
+                    if (CollUtil.isNotEmpty(dataRows)) {
+                        int batchSize = 1000;
+                        for (int i = 0; i < dataRows.size(); i += batchSize) {
+                            int end = Math.min(i + batchSize, dataRows.size());
+                            chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
+                        }
+                    }
+                    boolean isVip = "vip".equals(loginUser.getUserRole());
+                    biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
+
+                    // 删除列表缓存，确保新创建的图表能立即显示在列表中
+                    evictChartCache(null, loginUser.getId());
+
+                    // 立即返回给前端信息，不等AI分析结束
+                    BiResponse response = new BiResponse();
+                    response.setChartId(chartId);
+                    response.setGenResult("分析任务已提交，请稍后在\"我的图表\"查看结果");
+                    return response;
+                }
+            );
+            
+            return ResultUtils.success(biResponse);
+            
+        } catch (BusinessException e) {
+            // 如果是分布式锁获取失败（重复提交），需要回退限流次数
+            if (e.getMessage() != null && e.getMessage().contains("重复提交")) {
+                log.warn("检测到重复提交，回退限流次数: userId={}, lockKey={}", loginUser.getId(), lockKey);
+                // 回退每日限流次数（因为这次请求没有真正执行）
+                redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+                log.info("已成功回退限流次数: userId={}, 当前剩余次数={}", 
+                    loginUser.getId(), 
+                    redisLimiterManager.getRemainingPermits(loginUser.getId(), loginUser.getUserRole()));
             }
+            throw e;
+        } catch (Exception e) {
+            log.error("图表生成失败", e);
+            // 其他异常也回退限流次数
+            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图表生成失败：" + e.getMessage());
         }
-        List<List<Object>> dataRows = ExcelUtils.getDataList(rawDataList);
-        //3、保存到数据库
-        Chart chart = new Chart();
-        chart.setName(name);
-        chart.setGoal(goal);
-        chart.setChartType(chartType);
-        chart.setUserId(loginUser.getId());
-        chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-        boolean saveResult =chartService.createChart(chart);
-        if(!saveResult){
-            log.error("保存图表失败");
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "保存图表失败");
-
-        }
-
-        long chartId = chart.getId();
-        String tableName = "chart_" + chartId;
-        chartMapper.createChartTable(tableName, headers);
-        if (CollUtil.isNotEmpty(dataRows)) {
-            int batchSize = 1000;
-            for (int i = 0; i < dataRows.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, dataRows.size());
-                chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
-            }
-        }
-        boolean isVip= "vip".equals(loginUser.getUserRole());
-        biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
-
-        // 删除列表缓存，确保新创建的图表能立即显示在列表中
-        evictChartCache(null, loginUser.getId());
-
-        //5、立即返回给前端信息，不等AI分析结束
-        BiResponse biResponse = new BiResponse();
-        biResponse.setChartId(chartId);
-        biResponse.setGenResult("分析任务已提交，请稍后在\"我的图表\"查看结果");
-        return ResultUtils.success(biResponse);
-
     }
 
     /**

@@ -2,6 +2,7 @@ package com.yupi.springbootinit.manager;
 
 import com.yupi.springbootinit.common.ErrorCode;
 import com.yupi.springbootinit.exception.BusinessException;
+import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RRateLimiter;
 import org.redisson.api.RateIntervalUnit;
 import org.redisson.api.RateType;
@@ -14,6 +15,7 @@ import java.util.Date;
 import java.util.concurrent.TimeUnit;
 
 @Service
+@Slf4j
 public class RedisLimiterManager {
     @Resource
     private RedissonClient redissonClient;
@@ -97,6 +99,66 @@ public class RedisLimiterManager {
         String dailyKey = "gen_chart_daily_" + userId + "_" + todayStr;
         redissonClient.getRateLimiter(dailyKey).delete();
     }
+    /**
+     * 回退用户的限流次数（用于释放已扣减但未使用的配额）
+     * 适用场景：扣减限流后，因业务逻辑失败（如分布式锁获取失败）需要回退
+     * 
+     * @param userId 用户ID
+     * @param userRole 用户角色
+     */
+    public void rollbackDailyLimit(Long userId, String userRole) {
+        String todayStr = getTodayStr();
+        String dailyKey = "gen_chart_daily_" + userId + "_" + todayStr;
+        RRateLimiter dailyLimiter = redissonClient.getRateLimiter(dailyKey);
+        
+        // 如果限流器不存在，说明没有扣减过，无需回退
+        if (!dailyLimiter.isExists()) {
+            log.warn("限流器不存在，无需回退: userId={}", userId);
+            return;
+        }
+        
+        // 计算该用户角色的总额度
+        long dailyLimitCount = "vip".equals(userRole) || "admin".equals(userRole) ? 50 : 3;
+        
+        // 获取当前剩余的令牌数
+        long availablePermits = dailyLimiter.availablePermits();
+        
+        // 如果已经达到上限，说明没有扣减过或已经回退过，不再重复回退
+        if (availablePermits >= dailyLimitCount) {
+            log.info("限流次数已达上限，无需回退: userId={}, availablePermits={}", userId, availablePermits);
+            return;
+        }
+        
+        // 回退操作：通过 setRate 重新设置限流器来增加一个令牌
+        // 注意：Redisson 的 RRateLimiter 没有直接的"增加令牌"方法
+        // 我们使用一个变通方案：删除并重新创建限流器，设置新的令牌数
+        try {
+            // 保存当前已使用的次数
+            long usedCount = dailyLimitCount - availablePermits;
+            
+            // 回退一次，即已使用次数减1
+            long newUsedCount = Math.max(0, usedCount - 1);
+            
+            // 删除旧的限流器
+            dailyLimiter.delete();
+            
+            // 重新创建限流器，设置新的令牌数
+            dailyLimiter = redissonClient.getRateLimiter(dailyKey);
+            dailyLimiter.trySetRate(RateType.OVERALL, dailyLimitCount, 24, RateIntervalUnit.HOURS);
+            dailyLimiter.expire(1, TimeUnit.DAYS);
+            
+            // 预先消费掉已使用的令牌
+            for (int i = 0; i < newUsedCount; i++) {
+                dailyLimiter.tryAcquire(1);
+            }
+            
+            log.info("成功回退限流次数: userId={}, 回退后可用次数={}", userId, dailyLimiter.availablePermits());
+            
+        } catch (Exception e) {
+            log.error("回退限流次数失败: userId={}", userId, e);
+        }
+    }
+    
     /**
      * 辅助方法：获取当前日期字符串 (yyyyMMdd)
      */
