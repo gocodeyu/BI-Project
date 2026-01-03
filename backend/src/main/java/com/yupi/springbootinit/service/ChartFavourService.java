@@ -41,3 +41,4 @@ public interface ChartFavourService extends IService<ChartFavour> {
     boolean isFavour(long chartId, long userId);
 }
 
+

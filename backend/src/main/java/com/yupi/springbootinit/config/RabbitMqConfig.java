@@ -22,9 +22,11 @@ public class RabbitMqConfig {
     public static final String BI_DL_QUEUE_NAME = "bi_dl_queue";
     public static final String BI_DL_ROUTING_KEY = "bi_dl_routing_key";
 
-    // 1. 声明业务交换机
+    // 1. 声明业务交换机（持久化）
     @Bean
     public DirectExchange biExchange() {
+        // durable=true: 交换机持久化，重启后不丢失
+        // autoDelete=false: 不自动删除
         return new DirectExchange(BI_EXCHANGE_NAME, true, false);
     }
 

@@ -90,4 +90,13 @@
     <select id="countChartData" resultType="java.lang.Long">
         SELECT COUNT(*) FROM ${tableName}
     </select>
+
+    <!-- CAS 更新：只有状态为 WAIT 时才能更新为 RUNNING，用于幂等性保证 -->
+    <update id="updateStatusFromWaitToRunning">
+        UPDATE chart
+        SET status = 'running',
+            updateTime = NOW()
+        WHERE id = #{chartId}
+          AND status = 'wait'
+    </update>
 </mapper>

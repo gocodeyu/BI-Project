@@ -37,3 +37,4 @@ public interface ChartThumbService extends IService<ChartThumb> {
     boolean isThumb(long chartId, long userId);
 }
 
+

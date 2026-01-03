@@ -75,6 +75,14 @@ public interface ChartMapper extends BaseMapper<Chart> {
      * @return 总记录数
      */
     long countChartData(@Param("tableName") String tableName);
+
+    /**
+     * CAS 更新：只有状态为 WAIT 时才能更新为 RUNNING
+     * 用于幂等性保证，防止重复执行
+     * @param chartId 图表ID
+     * @return 影响的行数，0表示更新失败（当前状态不是WAIT），1表示更新成功
+     */
+    int updateStatusFromWaitToRunning(@Param("chartId") Long chartId);
 }
 
 

@@ -43,17 +43,18 @@ public class BiMessageConsumer {
     @RabbitListener(queues = RabbitMqConfig.BI_VIP_QUEUE_NAME, concurrency = "5-10", ackMode = "MANUAL")
     public void receiveVipMessage(String message, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) throws IOException {
         try {
-            log.info("VIP 消费者收到消息: {}", message);
+            log.info("[MQ消费者] VIP消费者收到消息 - message={}, deliveryTag={}", message, deliveryTag);
             processMessage(message);
             // 成功处理，手动 Ack
             channel.basicAck(deliveryTag, false);
+            log.info("[MQ消费者] VIP消息处理成功，已确认 - message={}, deliveryTag={}", message, deliveryTag);
         } catch (RetryableException e) {
             // 1. 捕获可重试异常：抛出异常，让 Spring AMQP 自动重试
-            log.warn("VIP队列出现可重试异常，等待 Spring 重试。消息: {}, 错误: {}", message, e.getMessage());
+            log.warn("[MQ消费者] VIP队列出现可重试异常，等待Spring重试 - message={}, error={}", message, e.getMessage());
             throw e;
         } catch (Exception e) {
             // 2. 捕获不可重试异常（或未知致命错误）：直接拒绝，不重回队列（进入死信）
-            log.error("VIP队列出现不可重试异常，拒绝消息进入死信。消息: {}", message, e);
+            log.error("[MQ消费者] VIP队列出现不可重试异常，拒绝消息进入死信 - message={}, error={}", message, e.getMessage(), e);
             channel.basicNack(deliveryTag, false, false);
         }
     }
@@ -64,14 +65,15 @@ public class BiMessageConsumer {
     @RabbitListener(queues = RabbitMqConfig.BI_COMMON_QUEUE_NAME, concurrency = "1-2", ackMode = "MANUAL")
     public void receiveCommonMessage(String message, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) throws IOException {
         try {
-            log.info("普通消费者收到消息: {}", message);
+            log.info("[MQ消费者] 普通消费者收到消息 - message={}, deliveryTag={}", message, deliveryTag);
             processMessage(message);
             channel.basicAck(deliveryTag, false);
+            log.info("[MQ消费者] 普通消息处理成功，已确认 - message={}, deliveryTag={}", message, deliveryTag);
         } catch (RetryableException e) {
-            log.warn("普通队列出现可重试异常，等待 Spring 重试。消息: {}, 错误: {}", message, e.getMessage());
+            log.warn("[MQ消费者] 普通队列出现可重试异常，等待Spring重试 - message={}, error={}", message, e.getMessage());
             throw e;
         } catch (Exception e) {
-            log.error("普通队列出现不可重试异常，拒绝消息进入死信。消息: {}", message, e);
+            log.error("[MQ消费者] 普通队列出现不可重试异常，拒绝消息进入死信 - message={}, error={}", message, e.getMessage(), e);
             channel.basicNack(deliveryTag, false, false);
         }
     }
@@ -86,21 +88,37 @@ public class BiMessageConsumer {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "消息为空");
         }
         long chartId = Long.parseLong(message);
+        
+        // --- 2. 幂等性检查：查询图表状态（提前检查，避免无效调用） ---
         Chart chart = chartService.getById(chartId);
         if (chart == null) {
+            log.warn("[MQ消费者] 图表不存在，确认消息 - chartId={}", chartId);
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图表不存在");
         }
 
-        // --- 2. 调用 BiAsyncService 来处理完整的图表生成流程 ---
-        // 该服务包含: 状态更新、AI调用、结果保存、缓存删除、SSE通知等完整流程
+        // --- 3. 状态检查：只有 WAIT 状态才处理（幂等性保证） ---
+        String currentStatus = chart.getStatus();
+        if (!"wait".equals(currentStatus)) {
+            log.info("[MQ消费者] 图表状态不是WAIT，跳过处理（幂等性保证） - chartId={}, status={}", chartId, currentStatus);
+            // 直接返回，不抛出异常（避免进入重试或死信队列）
+            // 这是一种幂等性处理：已处理过的消息直接确认
+            return;
+        }
+
+        // --- 4. 调用 BiAsyncService 来处理完整的图表生成流程 ---
+        // 该服务包含: 状态更新（CAS）、AI调用、结果保存、缓存删除、SSE通知等完整流程
+        // 注意：BiAsyncService 内部也有幂等性检查（双重保障）
+        log.info("[MQ消费者] 开始处理图表生成任务 - chartId={}", chartId);
         try {
             biAsyncService.executeGenChart(chartId);
+            log.info("[MQ消费者] 图表生成任务处理完成 - chartId={}", chartId);
         } catch (BusinessException e) {
             // 业务异常（不可重试）
+            log.error("[MQ消费者] 图表生成业务异常（不可重试） - chartId={}, error={}", chartId, e.getMessage());
             throw e;
         } catch (Exception e) {
             // 其他未知异常，视为可重试
-            log.error("图表生成过程出现异常, chartId: {}", chartId, e);
+            log.error("[MQ消费者] 图表生成过程出现异常（可重试） - chartId={}, error={}", chartId, e.getMessage(), e);
             throw new RetryableException("图表生成异常", e);
         }
     }

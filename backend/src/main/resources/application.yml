@@ -94,9 +94,14 @@ ai:
     model: "qwen-plus"
 rabbitmq:
   host: localhost
-  port: 5672
+  port: 5672  
   username: guest
   password: guest
+  # 生产者确认机制（Publisher Confirms）
+  publisher-confirm-type: correlated # 开启生产者确认模式
+  publisher-returns: true # 开启消息返回机制（路由失败时返回）
+  template:
+    mandatory: true # 消息路由失败时触发 ReturnsCallback
   listener:
     simple:
       acknowledge-mode: manual # 开启手动ACK，为了更精准控制

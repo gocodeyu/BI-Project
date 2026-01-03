@@ -31,7 +31,7 @@ public class ChartScheduler {
      * 任务1：重试机制
      * 每分钟执行一次，查找 "失败" 状态的任务，如果是“系统繁忙”或“超时”导致的，重新放入队列
      */
-    @Scheduled(cron = "0 0/1 * * * ?") // 每分钟执行一次
+   // @Scheduled(cron = "0 0/1 * * * ?") // 每分钟执行一次
     public void doRetryFailedCharts() {
         // 构造查询条件：(Status = FAILED) AND (msg like "系统繁忙" OR msg like "超时")
         QueryWrapper<Chart> queryWrapper = new QueryWrapper<>();
@@ -77,7 +77,7 @@ public class ChartScheduler {
      * 每 10 分钟执行一次
      * 查找状态一直卡在 RUNNING 且更新时间是很久之前的任务，强制标记为失败
      */
-    @Scheduled(cron = "0 0/10 * * * ?")
+   // @Scheduled(cron = "0 0/10 * * * ?")
     public void doCleanStuckRunningTasks() {
         // 定义“僵尸”标准：处于 RUNNING 状态，且 updateTime 在 30 分钟之前
         // 说明这个任务跑了30分钟还没完，或者服务器在执行过程中宕机了
@@ -111,7 +111,7 @@ public class ChartScheduler {
      * 补偿机制：捞起那些因为起步失败（DB抖动）而一直停留在 WAIT 状态的任务
      * 比如：任务创建了 5 分钟了，还是 WAIT，说明之前的提交线程可能挂了且没改状态
      */
-    @Scheduled(cron = "0 0/5 * * * ?") // 每5分钟
+    // @Scheduled(cron = "0 0/5 * * * ?") // 每5分钟 - 已关闭定时补偿机制
     public void doRetryStaleWaitTasks() {
         // 5分钟前
         Date fiveMinutesAgo = new Date(System.currentTimeMillis() - 5 * 60 * 1000);

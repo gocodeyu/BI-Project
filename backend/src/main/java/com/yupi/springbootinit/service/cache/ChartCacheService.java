@@ -53,16 +53,20 @@ public class ChartCacheService {
                 // 从 Hash 转换为 Chart 对象
                 Chart chart = hashToChart(hashMap);
                 if (chart != null) {
-                    log.debug("缓存命中: chartId={}", chartId);
+                    log.info("[缓存命中] Redis缓存命中 - chartId={}, cacheKey={}", chartId, redisKey);
                     return chart;
                 }
             }
 
             // 2. 查 DB
+            log.info("[缓存未命中] Redis缓存未命中，查询数据库 - chartId={}", chartId);
             Chart chart = chartService.getById(chartId);
             if (chart != null) {
                 // 3. 写入 Redis Hash
+                log.info("[缓存写入] 将数据库查询结果写入Redis - chartId={}", chartId);
                 saveChartToRedis(chart);
+            } else {
+                log.warn("[缓存查询] 数据库中不存在该图表 - chartId={}", chartId);
             }
             return chart;
 
@@ -85,10 +89,14 @@ public class ChartCacheService {
 
         String redisKey = REDIS_KEY_PREFIX + chartId;
         try {
-            stringRedisTemplate.delete(redisKey);
-            log.debug("删除图表详情缓存: chartId={}", chartId);
+            Boolean deleted = stringRedisTemplate.delete(redisKey);
+            if (Boolean.TRUE.equals(deleted)) {
+                log.info("[缓存删除] 成功删除图表详情缓存 - chartId={}, cacheKey={}", chartId, redisKey);
+            } else {
+                log.info("[缓存删除] 缓存键不存在或已删除 - chartId={}, cacheKey={}", chartId, redisKey);
+            }
         } catch (Exception e) {
-            log.error("删除图表详情缓存失败, chartId: {}", chartId, e);
+            log.error("[缓存删除失败] 删除图表详情缓存异常 - chartId={}, error={}", chartId, e.getMessage(), e);
         }
     }
 

@@ -99,7 +99,7 @@ public class ChartListCacheService {
             // 3. 查 Caffeine
             Page<ChartListVO> result = caffeineCache.getIfPresent(caffeineKey);
             if (result != null) {
-                log.debug("Caffeine 缓存命中: userId={}, current={}", userId, current);
+                log.info("[缓存命中] Caffeine本地缓存命中 - 图表列表 - userId={}, page={}, size={}, version={}", userId, current, pageSize, version);
                 return result;
             }
 
@@ -113,15 +113,16 @@ public class ChartListCacheService {
                     // 存入 Caffeine
                     if (result != null) {
                         caffeineCache.put(caffeineKey, result);
-                        log.debug("Redis 缓存命中: userId={}, current={}", userId, current);
+                        log.info("[缓存命中] Redis缓存命中，写入Caffeine - 图表列表 - userId={}, page={}, size={}, version={}", userId, current, pageSize, version);
                         return result;
                     }
                 } catch (Exception e) {
-                    log.error("Redis 缓存反序列化失败", e);
+                    log.error("[缓存错误] 图表列表Redis缓存反序列化失败 - userId={}, error={}", userId, e.getMessage(), e);
                 }
             }
 
             // 5. 查 DB
+            log.info("[缓存未命中] 多级缓存全未命中，查询数据库 - 图表列表 - userId={}, page={}, size={}", userId, current, pageSize);
             result = queryFromDb(chartQueryRequest);
             if (result != null) {
                 // 写入 Redis
@@ -130,6 +131,7 @@ public class ChartListCacheService {
                 stringRedisTemplate.opsForValue().set(cacheKey, json, ttl, TimeUnit.SECONDS);
                 // 写入 Caffeine
                 caffeineCache.put(caffeineKey, result);
+                log.info("[缓存写入] 数据库查询结果写入Redis和Caffeine - 图表列表 - userId={}, page={}, size={}, ttl={}s", userId, current, pageSize, ttl);
             }
 
             return result;
@@ -163,15 +165,16 @@ public class ChartListCacheService {
                     Page<Chart> cachedPage = gson.fromJson(redisValue, Page.class);
                     Page<Chart> result = cachedPage;
                     if (result != null) {
-                        log.debug("回收站列表 Redis 缓存命中: userId={}, current={}", userId, current);
+                        log.info("[缓存命中] Redis缓存命中 - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
                         return result;
                     }
                 } catch (Exception e) {
-                    log.error("回收站列表 Redis 缓存反序列化失败", e);
+                    log.error("[缓存错误] 回收站列表Redis缓存反序列化失败 - userId={}, error={}", userId, e.getMessage(), e);
                 }
             }
 
             // 查 DB
+            log.info("[缓存未命中] Redis缓存未命中，查询数据库 - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
             Page<Chart> chartPage = new Page<>(current, pageSize);
             chartPage = chartService.listMyDeletedChartByPage(chartPage, chartQueryRequest);
 
@@ -179,6 +182,7 @@ public class ChartListCacheService {
                 // 写入 Redis
                 String json = gson.toJson(chartPage);
                 stringRedisTemplate.opsForValue().set(cacheKey, json, 60, TimeUnit.SECONDS);
+                log.info("[缓存写入] 数据库查询结果写入Redis - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
             }
 
             return chartPage;
@@ -200,10 +204,10 @@ public class ChartListCacheService {
 
         try {
             String versionKey = REDIS_VERSION_KEY_PREFIX + userId + ":v";
-            stringRedisTemplate.opsForValue().increment(versionKey);
-            log.debug("我的图表列表缓存版本号自增: userId={}", userId);
+            Long newVersion = stringRedisTemplate.opsForValue().increment(versionKey);
+            log.info("[缓存删除] 图表列表缓存版本号自增 - userId={}, 新版本号={}", userId, newVersion);
         } catch (Exception e) {
-            log.error("使我的图表列表缓存失效失败, userId: {}", userId, e);
+            log.error("[缓存删除失败] 使图表列表缓存失效异常 - userId={}, error={}", userId, e.getMessage(), e);
         }
     }
 
@@ -218,15 +222,19 @@ public class ChartListCacheService {
         try {
             // 回收站列表使用简单的 Key 模式，需要删除所有相关 Key
             // 这里简化处理，只删除常见的前几页
+            int deletedCount = 0;
             for (int page = 1; page <= 3; page++) {
                 for (int size = 10; size <= 20; size += 10) {
                     String cacheKey = REDIS_DELETE_LIST_KEY_PREFIX + userId + ":p" + page + ":s" + size;
-                    stringRedisTemplate.delete(cacheKey);
+                    Boolean deleted = stringRedisTemplate.delete(cacheKey);
+                    if (Boolean.TRUE.equals(deleted)) {
+                        deletedCount++;
+                    }
                 }
             }
-            log.debug("回收站列表缓存已删除: userId={}", userId);
+            log.info("[缓存删除] 回收站列表缓存已删除 - userId={}, 删除键数量={}", userId, deletedCount);
         } catch (Exception e) {
-            log.error("使回收站列表缓存失效失败, userId: {}", userId, e);
+            log.error("[缓存删除失败] 使回收站列表缓存失效异常 - userId={}, error={}", userId, e.getMessage(), e);
         }
     }
 

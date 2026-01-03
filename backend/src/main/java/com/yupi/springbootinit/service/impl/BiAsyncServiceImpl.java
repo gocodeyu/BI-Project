@@ -48,22 +48,31 @@ public class BiAsyncServiceImpl implements BiAsyncService {
     private final ThreadPoolExecutor aiExecutor = new ThreadPoolExecutor(
             2, 4, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(10));
     public void executeGenChart(long chartId) {
-        // 1. 先修改状态为“执行中”
-        Chart updateChartRunning = new Chart();
-        updateChartRunning.setId(chartId);
-        updateChartRunning.setStatus(GenChartStatusEnum.RUNNING.getValue());
-        boolean b = chartService.updateById(updateChartRunning);
-        if (!b) {
-            //会通过补偿机制重试
-            // 如果这里失败，后续逻辑无意义，直接停止。
-            // 依靠定时任务（僵尸清理）来兜底
-            log.error("更新图表执行中状态失败，停止执行。chartId: {}", chartId);
+        // 1. 幂等性检查：查询当前状态
+        Chart chart = chartService.getById(chartId);
+        if (chart == null) {
+            log.warn("图表不存在，跳过执行: chartId={}", chartId);
             return;
         }
 
+        // 2. 状态检查：只有 WAIT 状态才能执行（幂等性保证）
+        String currentStatus = chart.getStatus();
+        if (!GenChartStatusEnum.WAIT.getValue().equals(currentStatus)) {
+            log.info("图表状态不是 WAIT，跳过执行（幂等性保证）: chartId={}, currentStatus={}", chartId, currentStatus);
+            return; // 已处理过的请求直接返回，确保幂等性
+        }
+
+        // 3. CAS 更新：只有 WAIT 状态才能更新为 RUNNING（原子性保证）
+        int updateCount = chartMapper.updateStatusFromWaitToRunning(chartId);
+        if (updateCount <= 0) {
+            log.warn("状态更新失败（可能已被其他线程处理），跳过执行: chartId={}", chartId);
+            return; // CAS 更新失败，说明已被其他线程处理，确保幂等性
+        }
+
+        log.info("成功将图表状态更新为 RUNNING: chartId={}", chartId);
+
         try {
-            // 2. 获取数据 (复用你之前的逻辑)
-            Chart chart = chartService.getById(chartId);
+            // 4. 获取数据（chart 变量已在第52行定义）
             String goal = chart.getGoal();
             String chartType = chart.getChartType();
             String tableName = "chart_" + chartId;
@@ -127,8 +136,7 @@ public class BiAsyncServiceImpl implements BiAsyncService {
             log.error("AI生成超时, chartId: {}", chartId);
             String errorMessage = "AI生成超时，系统自动终止";
             handleChartUpdateError(chartId, errorMessage);
-            // 获取图表信息用于删除缓存和推送通知
-            Chart chart = chartService.getById(chartId);
+            // 获取图表信息用于删除缓存和推送通知（chart 变量已在方法开头定义）
             if (chart != null) {
                 evictChartCache(chartId, chart.getUserId());
                 sseNotifyService.publishTaskNotification(chart.getUserId(), chartId, "failed", errorMessage);
@@ -137,8 +145,7 @@ public class BiAsyncServiceImpl implements BiAsyncService {
             log.error("AI生成异步任务失败, chartId: {}", chartId, e);
             String errorMessage = "执行失败: " + e.getMessage();
             handleChartUpdateError(chartId, errorMessage);
-            // 获取图表信息用于删除缓存和推送通知
-            Chart chart = chartService.getById(chartId);
+            // 获取图表信息用于删除缓存和推送通知（chart 变量已在方法开头定义）
             if (chart != null) {
                 evictChartCache(chartId, chart.getUserId());
                 sseNotifyService.publishTaskNotification(chart.getUserId(), chartId, "failed", errorMessage);

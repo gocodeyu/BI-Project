@@ -80,7 +80,7 @@ public class ChartDataCacheService {
             // 1. 查 Caffeine
             ChartDataPreviewResponse result = caffeineCache.getIfPresent(caffeineKey);
             if (result != null) {
-                log.debug("数据预览 Caffeine 缓存命中: chartId={}, current={}", chartId, current);
+                log.info("[缓存命中] Caffeine本地缓存命中 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
                 return result;
             }
 
@@ -92,15 +92,16 @@ public class ChartDataCacheService {
                     if (result != null) {
                         // 存入 Caffeine
                         caffeineCache.put(caffeineKey, result);
-                        log.debug("数据预览 Redis 缓存命中: chartId={}, current={}", chartId, current);
+                        log.info("[缓存命中] Redis缓存命中，写入Caffeine - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
                         return result;
                     }
                 } catch (Exception e) {
-                    log.error("数据预览 Redis 缓存反序列化失败", e);
+                    log.error("[缓存错误] 数据预览Redis缓存反序列化失败 - chartId={}, error={}", chartId, e.getMessage(), e);
                 }
             }
 
             // 3. 查 DB
+            log.info("[缓存未命中] 多级缓存全未命中，查询数据库 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
             result = queryFromDb(chartId, current, pageSize);
             if (result != null) {
                 // 写入 Redis
@@ -109,6 +110,7 @@ public class ChartDataCacheService {
                 stringRedisTemplate.opsForValue().set(cacheKey, json, ttl, TimeUnit.SECONDS);
                 // 写入 Caffeine
                 caffeineCache.put(caffeineKey, result);
+                log.info("[缓存写入] 数据库查询结果写入Redis和Caffeine - 数据预览 - chartId={}, page={}, size={}, ttl={}s", chartId, current, pageSize, ttl);
             }
 
             return result;
@@ -132,16 +134,20 @@ public class ChartDataCacheService {
 
         try {
             // 删除所有相关 Key（前 3 页 + 常用 pageSize）
+            int deletedCount = 0;
             for (int page = 1; page <= MAX_CACHE_PAGE; page++) {
                 for (int size : CACHEABLE_PAGE_SIZES) {
                     String cacheKey = REDIS_KEY_PREFIX + chartId + ":p" + page + ":s" + size;
-                    stringRedisTemplate.delete(cacheKey);
+                    Boolean deleted = stringRedisTemplate.delete(cacheKey);
+                    if (Boolean.TRUE.equals(deleted)) {
+                        deletedCount++;
+                    }
                     // 删除 Caffeine
                     String caffeineKey = CAFFEINE_KEY_PREFIX + chartId + ":p" + page + ":s" + size;
                     caffeineCache.invalidate(caffeineKey);
                 }
             }
-            log.debug("图表数据预览缓存已删除: chartId={}", chartId);
+            log.info("[缓存删除] 图表数据预览缓存已删除 - chartId={}, 删除Redis键数量={}", chartId, deletedCount);
         } catch (Exception e) {
             log.error("删除图表数据预览缓存失败, chartId: {}", chartId, e);
         }

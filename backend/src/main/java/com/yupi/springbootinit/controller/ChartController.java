@@ -34,6 +34,7 @@ import com.yupi.springbootinit.model.vo.ChartDataPreviewResponse;
 import com.yupi.springbootinit.model.vo.ChartListVO;
 import com.yupi.springbootinit.service.BiAsyncService;
 import com.yupi.springbootinit.service.ChartService;
+import com.yupi.springbootinit.service.ChartTransactionService;
 import com.yupi.springbootinit.service.DistributedLockService;
 import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
@@ -94,6 +95,9 @@ public class ChartController {
     private RedisLimiterManager redisLimiterManager;
     @Resource
     private BiMessageProducer biMessageProducer;
+
+    @Resource
+    private ChartTransactionService chartTransactionService;
 
     @Resource
     private com.yupi.springbootinit.service.cache.ChartCacheService chartCacheService;
@@ -361,22 +365,12 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
                 0,  // waitTime: 0 秒，不等待，立即失败
                 10, // leaseTime: 10 秒后自动释放锁（防止死锁）
                 () -> {
-                    // 更新表格状态
-                    Chart updateChart = new Chart();
-                    updateChart.setId(chartId);
-                    updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
-                    updateChart.setExecMessage("");
-                    boolean update = chartService.updateById(updateChart);
-                    if(!update){
-                        log.error("更新图表状态失败, chartId: {}", chartId);
-                        throw new BusinessException(ErrorCode.OPERATION_ERROR);
-                    }
-                    // 删除缓存
-                    evictChartCache(chartId, chart.getUserId());
-                    
-                    // 异步提交任务
+                    // 在事务中更新图表状态并发送MQ消息
                     boolean isVip = "vip".equals(loginUser.getUserRole());
-                    biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
+                    chartTransactionService.updateChartStatusAndSendMessage(chartId, isVip);
+                    
+                    // 删除缓存（在事务提交后执行，不影响事务）
+                    evictChartCache(chartId, chart.getUserId());
                     
                     return true;
                 }
@@ -480,18 +474,14 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
             BiResponse biResponse = distributedLockService.executeWithLock(
                 lockKey,
                 0,  // waitTime: 0 秒，不等待，立即失败
-                10, // leaseTime: 10 秒后自动释放锁（防止死锁）
+                30, // leaseTime: 30 秒后自动释放锁（防止死锁，覆盖完整业务流程）
                 () -> {
-                    // 更新数据库状态为 WAIT
-                    chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-                    boolean saveResult = chartService.updateById(chart);
-                    ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "更新图表状态失败");
-                    // 删除缓存
-                    evictChartCache(id, oldChart.getUserId());
-
-                    // 开启异步任务
+                    // 在事务中更新图表并发送MQ消息
                     boolean isVip = "vip".equals(loginUser.getUserRole());
-                    biMessageProducer.sendMessage(String.valueOf(id), isVip);
+                    chartTransactionService.updateChartOnlyAndSendMessage(chart, isVip);
+                    
+                    // 删除缓存（在事务提交后执行，不影响事务）
+                    evictChartCache(id, oldChart.getUserId());
 
                     // 立即返回前端
                     BiResponse response = new BiResponse();
@@ -586,7 +576,7 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
             BiResponse biResponse = distributedLockService.executeWithLock(
                 lockKey, 
                 0,  // waitTime: 0 秒，不等待，立即失败
-                10, // leaseTime: 10 秒后自动释放锁（防止死锁）
+                30, // leaseTime: 30 秒后自动释放锁（防止死锁，覆盖完整业务流程）
                 () -> {
                     // 业务逻辑开始
                     List<String> headers = ExcelUtils.getHeaders(rawDataList);
@@ -605,33 +595,19 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
                     }
                     List<List<Object>> dataRows = ExcelUtils.getDataList(rawDataList);
                     
-                    // 保存到数据库
+                    // 在事务中创建图表、创建数据表、插入数据、发送MQ消息
                     Chart chart = new Chart();
                     chart.setName(name);
                     chart.setGoal(goal);
                     chart.setChartType(chartType);
                     chart.setUserId(loginUser.getId());
                     chart.setStatus(GenChartStatusEnum.WAIT.getValue());
-                    boolean saveResult = chartService.createChart(chart);
-                    if(!saveResult){
-                        log.error("保存图表失败");
-                        throw new BusinessException(ErrorCode.SYSTEM_ERROR, "保存图表失败");
-                    }
-
-                    long chartId = chart.getId();
-                    String tableName = "chart_" + chartId;
-                    chartMapper.createChartTable(tableName, headers);
-                    if (CollUtil.isNotEmpty(dataRows)) {
-                        int batchSize = 1000;
-                        for (int i = 0; i < dataRows.size(); i += batchSize) {
-                            int end = Math.min(i + batchSize, dataRows.size());
-                            chartMapper.insertChartData(tableName, headers, dataRows.subList(i, end));
-                        }
-                    }
+                    
                     boolean isVip = "vip".equals(loginUser.getUserRole());
-                    biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
+                    // 在事务中执行所有数据库操作和MQ消息发送
+                    long chartId = chartTransactionService.createChartWithTransaction(chart, headers, dataRows, isVip);
 
-                    // 删除列表缓存，确保新创建的图表能立即显示在列表中
+                    // 删除列表缓存，确保新创建的图表能立即显示在列表中（在事务提交后执行，不影响事务）
                     evictChartCache(null, loginUser.getId());
 
                     // 立即返回给前端信息，不等AI分析结束

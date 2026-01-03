@@ -12,3 +12,4 @@ CREATE TABLE IF NOT EXISTS `chart_favour` (
   INDEX `idx_chartId` (`chartId`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='图表收藏';
 
+

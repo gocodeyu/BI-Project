@@ -16,3 +16,4 @@ CREATE TABLE IF NOT EXISTS `chart_thumb` (
 ALTER TABLE `chart` 
 ADD COLUMN IF NOT EXISTS `thumbNum` int DEFAULT 0 COMMENT '点赞数';
 
+
