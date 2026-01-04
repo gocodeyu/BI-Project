@@ -25,6 +25,8 @@ public class ChartCacheService {
     private static final String REDIS_KEY_PREFIX = "bi:chart:";
     private static final int TTL_MINUTES = 15;
     private static final int TTL_RANDOM_OFFSET_SECONDS = 60; // 随机偏移 ±60秒，避免雪崩
+    private static final String NULL_VALUE_MARKER = "__NULL__"; // 空值标记，用于防止缓存穿透
+    private static final int NULL_VALUE_TTL_SECONDS = 60; // 空值缓存TTL：60秒（短TTL，防止恶意查询）
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
@@ -50,6 +52,13 @@ public class ChartCacheService {
             // 1. 先查 Redis Hash
             Map<Object, Object> hashMap = stringRedisTemplate.opsForHash().entries(redisKey);
             if (!hashMap.isEmpty()) {
+                // 检查是否为空值标记（防止缓存穿透）
+                Object nullMarker = hashMap.get("__null__");
+                if (NULL_VALUE_MARKER.equals(nullMarker)) {
+                    log.info("[缓存穿透防护] 检测到空值缓存，直接返回null - chartId={}, cacheKey={}", chartId, redisKey);
+                    return null;
+                }
+                
                 // 从 Hash 转换为 Chart 对象
                 Chart chart = hashToChart(hashMap);
                 if (chart != null) {
@@ -62,11 +71,13 @@ public class ChartCacheService {
             log.info("[缓存未命中] Redis缓存未命中，查询数据库 - chartId={}", chartId);
             Chart chart = chartService.getById(chartId);
             if (chart != null) {
-                // 3. 写入 Redis Hash
+                // 3. 写入 Redis Hash（正常数据）
                 log.info("[缓存写入] 将数据库查询结果写入Redis - chartId={}", chartId);
                 saveChartToRedis(chart);
             } else {
-                log.warn("[缓存查询] 数据库中不存在该图表 - chartId={}", chartId);
+                // 4. 防止缓存穿透：缓存空值（短TTL）
+                log.warn("[缓存穿透防护] 数据库中不存在该图表，缓存空值 - chartId={}", chartId);
+                saveNullValueToRedis(chartId);
             }
             return chart;
 
@@ -131,6 +142,29 @@ public class ChartCacheService {
 
         } catch (Exception e) {
             log.error("保存图表到 Redis 失败, chartId: {}", chart.getId(), e);
+        }
+    }
+
+    /**
+     * 保存空值到 Redis（防止缓存穿透）
+     * 当查询不存在的数据时，也缓存一个空值标记，避免重复查询数据库
+     *
+     * @param chartId 图表ID
+     */
+    private void saveNullValueToRedis(Long chartId) {
+        if (chartId == null || chartId <= 0) {
+            return;
+        }
+
+        String redisKey = REDIS_KEY_PREFIX + chartId;
+        try {
+            // 使用特殊字段标记空值
+            stringRedisTemplate.opsForHash().put(redisKey, "__null__", NULL_VALUE_MARKER);
+            // 设置短TTL（60秒），防止恶意查询占用缓存空间
+            stringRedisTemplate.expire(redisKey, NULL_VALUE_TTL_SECONDS, TimeUnit.SECONDS);
+            log.info("[缓存穿透防护] 已缓存空值标记 - chartId={}, ttl={}s", chartId, NULL_VALUE_TTL_SECONDS);
+        } catch (Exception e) {
+            log.error("保存空值到 Redis 失败, chartId: {}", chartId, e);
         }
     }
 

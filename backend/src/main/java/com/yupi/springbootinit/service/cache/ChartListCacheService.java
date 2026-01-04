@@ -37,6 +37,8 @@ public class ChartListCacheService {
     private static final int REDIS_DATA_TTL_SECONDS = 60;
     private static final int REDIS_DATA_TTL_RANDOM_OFFSET = 10; // ±10秒
     private static final int CAFFEINE_TTL_SECONDS = 20;
+    private static final String NULL_VALUE_MARKER = "__NULL_PAGE__"; // 空值标记，用于防止缓存穿透
+    private static final int NULL_VALUE_TTL_SECONDS = 60; // 空值缓存TTL：60秒
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
@@ -106,6 +108,16 @@ public class ChartListCacheService {
             // 4. 查 Redis
             String redisValue = stringRedisTemplate.opsForValue().get(cacheKey);
             if (StringUtils.isNotBlank(redisValue)) {
+                // 检查是否为空值标记（防止缓存穿透）
+                if (NULL_VALUE_MARKER.equals(redisValue)) {
+                    log.info("[缓存穿透防护] 检测到空值缓存，返回空分页 - 图表列表 - userId={}, page={}, size={}", userId, current, pageSize);
+                    // 返回空分页对象
+                    Page<ChartListVO> emptyPage = new Page<>(current, pageSize);
+                    emptyPage.setTotal(0);
+                    emptyPage.setRecords(java.util.Collections.emptyList());
+                    return emptyPage;
+                }
+                
                 try {
                     @SuppressWarnings("unchecked")
                     Page<ChartListVO> cachedPage = gson.fromJson(redisValue, Page.class);
@@ -124,14 +136,21 @@ public class ChartListCacheService {
             // 5. 查 DB
             log.info("[缓存未命中] 多级缓存全未命中，查询数据库 - 图表列表 - userId={}, page={}, size={}", userId, current, pageSize);
             result = queryFromDb(chartQueryRequest);
-            if (result != null) {
-                // 写入 Redis
+            if (result != null && result.getTotal() > 0) {
+                // 写入 Redis（正常数据）
                 String json = gson.toJson(result);
                 long ttl = REDIS_DATA_TTL_SECONDS + (long) (Math.random() * 2 * REDIS_DATA_TTL_RANDOM_OFFSET - REDIS_DATA_TTL_RANDOM_OFFSET);
                 stringRedisTemplate.opsForValue().set(cacheKey, json, ttl, TimeUnit.SECONDS);
                 // 写入 Caffeine
                 caffeineCache.put(caffeineKey, result);
                 log.info("[缓存写入] 数据库查询结果写入Redis和Caffeine - 图表列表 - userId={}, page={}, size={}, ttl={}s", userId, current, pageSize, ttl);
+            } else {
+                // 防止缓存穿透：缓存空值（短TTL）
+                // 注意：空列表也可能是有意义的（用户确实没有图表），所以这里只缓存真正的空结果
+                if (result != null && result.getTotal() == 0) {
+                    log.info("[缓存穿透防护] 查询结果为空，缓存空值标记 - 图表列表 - userId={}, page={}, size={}", userId, current, pageSize);
+                    stringRedisTemplate.opsForValue().set(cacheKey, NULL_VALUE_MARKER, NULL_VALUE_TTL_SECONDS, TimeUnit.SECONDS);
+                }
             }
 
             return result;
@@ -160,6 +179,15 @@ public class ChartListCacheService {
             // 查 Redis
             String redisValue = stringRedisTemplate.opsForValue().get(cacheKey);
             if (StringUtils.isNotBlank(redisValue)) {
+                // 检查是否为空值标记（防止缓存穿透）
+                if (NULL_VALUE_MARKER.equals(redisValue)) {
+                    log.info("[缓存穿透防护] 检测到空值缓存，返回空分页 - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
+                    Page<Chart> emptyPage = new Page<>(current, pageSize);
+                    emptyPage.setTotal(0);
+                    emptyPage.setRecords(java.util.Collections.emptyList());
+                    return emptyPage;
+                }
+                
                 try {
                     @SuppressWarnings("unchecked")
                     Page<Chart> cachedPage = gson.fromJson(redisValue, Page.class);
@@ -178,11 +206,15 @@ public class ChartListCacheService {
             Page<Chart> chartPage = new Page<>(current, pageSize);
             chartPage = chartService.listMyDeletedChartByPage(chartPage, chartQueryRequest);
 
-            if (chartPage != null) {
-                // 写入 Redis
+            if (chartPage != null && chartPage.getTotal() > 0) {
+                // 写入 Redis（正常数据）
                 String json = gson.toJson(chartPage);
                 stringRedisTemplate.opsForValue().set(cacheKey, json, 60, TimeUnit.SECONDS);
                 log.info("[缓存写入] 数据库查询结果写入Redis - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
+            } else if (chartPage != null && chartPage.getTotal() == 0) {
+                // 防止缓存穿透：缓存空值（短TTL）
+                log.info("[缓存穿透防护] 查询结果为空，缓存空值标记 - 回收站列表 - userId={}, page={}, size={}", userId, current, pageSize);
+                stringRedisTemplate.opsForValue().set(cacheKey, NULL_VALUE_MARKER, NULL_VALUE_TTL_SECONDS, TimeUnit.SECONDS);
             }
 
             return chartPage;

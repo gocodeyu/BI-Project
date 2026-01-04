@@ -35,6 +35,8 @@ public class ChartDataCacheService {
     private static final int CAFFEINE_TTL_SECONDS = 120; // 2分钟
     private static final int MAX_CACHE_PAGE = 3; // 最多缓存前 3 页
     private static final int[] CACHEABLE_PAGE_SIZES = {10, 20}; // 可缓存的 pageSize
+    private static final String NULL_VALUE_MARKER = "__NULL_DATA__"; // 空值标记，用于防止缓存穿透
+    private static final int NULL_VALUE_TTL_SECONDS = 60; // 空值缓存TTL：60秒
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
@@ -87,6 +89,17 @@ public class ChartDataCacheService {
             // 2. 查 Redis
             String redisValue = stringRedisTemplate.opsForValue().get(cacheKey);
             if (StringUtils.isNotBlank(redisValue)) {
+                // 检查是否为空值标记（防止缓存穿透）
+                if (NULL_VALUE_MARKER.equals(redisValue)) {
+                    log.info("[缓存穿透防护] 检测到空值缓存，返回空数据 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
+                    // 返回空数据对象
+                    ChartDataPreviewResponse emptyResponse = new ChartDataPreviewResponse();
+                    emptyResponse.setHeaders(java.util.Collections.emptyList());
+                    emptyResponse.setData(java.util.Collections.emptyList());
+                    emptyResponse.setTotal(0);
+                    return emptyResponse;
+                }
+                
                 try {
                     result = gson.fromJson(redisValue, ChartDataPreviewResponse.class);
                     if (result != null) {
@@ -103,14 +116,25 @@ public class ChartDataCacheService {
             // 3. 查 DB
             log.info("[缓存未命中] 多级缓存全未命中，查询数据库 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
             result = queryFromDb(chartId, current, pageSize);
-            if (result != null) {
-                // 写入 Redis
+            if (result != null && result.getTotal() > 0) {
+                // 写入 Redis（正常数据）
                 String json = gson.toJson(result);
                 long ttl = REDIS_TTL_SECONDS + (long) (Math.random() * 2 * REDIS_TTL_RANDOM_OFFSET - REDIS_TTL_RANDOM_OFFSET);
                 stringRedisTemplate.opsForValue().set(cacheKey, json, ttl, TimeUnit.SECONDS);
                 // 写入 Caffeine
                 caffeineCache.put(caffeineKey, result);
                 log.info("[缓存写入] 数据库查询结果写入Redis和Caffeine - 数据预览 - chartId={}, page={}, size={}, ttl={}s", chartId, current, pageSize, ttl);
+            } else {
+                // 防止缓存穿透：缓存空值（短TTL）
+                // 注意：这里可能是图表数据表不存在或为空，缓存空值避免重复查询
+                if (result != null && result.getTotal() == 0) {
+                    log.info("[缓存穿透防护] 查询结果为空，缓存空值标记 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
+                    stringRedisTemplate.opsForValue().set(cacheKey, NULL_VALUE_MARKER, NULL_VALUE_TTL_SECONDS, TimeUnit.SECONDS);
+                } else if (result == null) {
+                    // 查询失败或表不存在，也缓存空值（避免重复尝试）
+                    log.warn("[缓存穿透防护] 查询失败，缓存空值标记 - 数据预览 - chartId={}, page={}, size={}", chartId, current, pageSize);
+                    stringRedisTemplate.opsForValue().set(cacheKey, NULL_VALUE_MARKER, NULL_VALUE_TTL_SECONDS, TimeUnit.SECONDS);
+                }
             }
 
             return result;
