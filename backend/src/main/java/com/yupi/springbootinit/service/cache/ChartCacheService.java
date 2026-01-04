@@ -1,8 +1,8 @@
 package com.yupi.springbootinit.service.cache;
 
-import com.google.gson.Gson;
 import com.yupi.springbootinit.model.entity.Chart;
 import com.yupi.springbootinit.service.ChartService;
+import com.yupi.springbootinit.service.DistributedLockService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -23,16 +23,24 @@ import java.util.concurrent.TimeUnit;
 public class ChartCacheService {
 
     private static final String REDIS_KEY_PREFIX = "bi:chart:";
+    private static final String LOCK_KEY_PREFIX = "lock:chart:cache:"; // 分布式锁Key前缀
     private static final int TTL_MINUTES = 15;
     private static final int TTL_RANDOM_OFFSET_SECONDS = 60; // 随机偏移 ±60秒，避免雪崩
     private static final String NULL_VALUE_MARKER = "__NULL__"; // 空值标记，用于防止缓存穿透
     private static final int NULL_VALUE_TTL_SECONDS = 60; // 空值缓存TTL：60秒（短TTL，防止恶意查询）
+    private static final long LOCK_WAIT_TIME = 0; // 锁等待时间：0秒（不等待，立即失败）
+    private static final long LOCK_LEASE_TIME = 10; // 锁自动释放时间：10秒（防止死锁）
+    private static final long RETRY_WAIT_MILLIS = 50; // 获取锁失败后，等待重试的时间（毫秒）
+    private static final int MAX_RETRY_COUNT = 3; // 最大重试次数
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
     @Resource
     private ChartService chartService;
+
+    @Resource
+    private DistributedLockService distributedLockService;
 
     /**
      * 获取图表详情（带缓存）
@@ -67,19 +75,110 @@ public class ChartCacheService {
                 }
             }
 
-            // 2. 查 DB
-            log.info("[缓存未命中] Redis缓存未命中，查询数据库 - chartId={}", chartId);
-            Chart chart = chartService.getById(chartId);
-            if (chart != null) {
-                // 3. 写入 Redis Hash（正常数据）
-                log.info("[缓存写入] 将数据库查询结果写入Redis - chartId={}", chartId);
-                saveChartToRedis(chart);
-            } else {
-                // 4. 防止缓存穿透：缓存空值（短TTL）
-                log.warn("[缓存穿透防护] 数据库中不存在该图表，缓存空值 - chartId={}", chartId);
-                saveNullValueToRedis(chartId);
+            // 2. 缓存未命中，使用分布式锁防止缓存击穿
+            String lockKey = LOCK_KEY_PREFIX + chartId;
+            
+            // 尝试获取锁并查询
+            try {
+                Chart chart = distributedLockService.executeWithLock(
+                    lockKey,
+                    LOCK_WAIT_TIME,
+                    LOCK_LEASE_TIME,
+                    () -> {
+                        // 双重检查：获取锁后再次检查缓存（可能其他线程已写入）
+                        Map<Object, Object> doubleCheckMap = stringRedisTemplate.opsForHash().entries(redisKey);
+                        if (!doubleCheckMap.isEmpty()) {
+                            // 检查是否为空值标记
+                            Object nullMarker = doubleCheckMap.get("__null__");
+                            if (NULL_VALUE_MARKER.equals(nullMarker)) {
+                                log.info("[缓存击穿防护] 双重检查：检测到空值缓存 - chartId={}", chartId);
+                                return null;
+                            }
+                            
+                            // 从 Hash 转换为 Chart 对象
+                            Chart cachedChart = hashToChart(doubleCheckMap);
+                            if (cachedChart != null) {
+                                log.info("[缓存击穿防护] 双重检查：缓存已存在，直接返回 - chartId={}", chartId);
+                                return cachedChart;
+                            }
+                        }
+                        
+                        // 3. 查 DB
+                        log.info("[缓存击穿防护] 获取锁成功，查询数据库 - chartId={}", chartId);
+                        Chart dbChart = chartService.getById(chartId);
+                        
+                        if (dbChart != null) {
+                            // 4. 写入 Redis Hash（正常数据）
+                            log.info("[缓存击穿防护] 查询成功，写入Redis - chartId={}", chartId);
+                            saveChartToRedis(dbChart);
+                        } else {
+                            // 5. 防止缓存穿透：缓存空值（短TTL）
+                            log.warn("[缓存击穿防护] 数据库中不存在该图表，缓存空值 - chartId={}", chartId);
+                            saveNullValueToRedis(chartId);
+                        }
+                        
+                        return dbChart;
+                    }
+                );
+                
+                return chart;
+                
+            } catch (Exception e) {
+                // 获取锁失败，等待后重试检查缓存（可能其他线程已写入）
+                log.info("[缓存击穿防护] 获取锁失败，等待{}ms后重试检查缓存 - chartId={}", RETRY_WAIT_MILLIS, chartId);
+                
+                // 等待一小段时间，让获取锁成功的线程完成查询和写入缓存
+                try {
+                    Thread.sleep(RETRY_WAIT_MILLIS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.warn("[缓存击穿防护] 等待被中断，直接查DB - chartId={}", chartId);
+                    return chartService.getById(chartId);
+                }
+                
+                // 重试检查缓存（可能其他线程已经写入）
+                for (int i = 0; i < MAX_RETRY_COUNT; i++) {
+                    Map<Object, Object> retryMap = stringRedisTemplate.opsForHash().entries(redisKey);
+                    if (!retryMap.isEmpty()) {
+                        // 检查是否为空值标记
+                        Object nullMarker = retryMap.get("__null__");
+                        if (NULL_VALUE_MARKER.equals(nullMarker)) {
+                            log.info("[缓存击穿防护] 重试检查：检测到空值缓存 - chartId={}, retry={}", chartId, i + 1);
+                            return null;
+                        }
+                        
+                        // 从 Hash 转换为 Chart 对象
+                        Chart retryChart = hashToChart(retryMap);
+                        if (retryChart != null) {
+                            log.info("[缓存击穿防护] 重试检查：缓存已存在，直接返回 - chartId={}, retry={}", chartId, i + 1);
+                            return retryChart;
+                        }
+                    }
+                    
+                    // 如果缓存还是不存在，再等待一小段时间后重试
+                    if (i < MAX_RETRY_COUNT - 1) {
+                        try {
+                            Thread.sleep(RETRY_WAIT_MILLIS);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                }
+                
+                // 如果重试多次后缓存还是不存在，降级：直接查DB
+                log.warn("[缓存击穿防护] 重试{}次后缓存仍不存在，降级查DB - chartId={}", MAX_RETRY_COUNT, chartId);
+                Chart chart = chartService.getById(chartId);
+                if (chart != null) {
+                    // 尝试写入缓存（不阻塞）
+                    try {
+                        saveChartToRedis(chart);
+                    } catch (Exception ex) {
+                        log.error("[缓存击穿防护] 降级写入缓存失败 - chartId={}", chartId, ex);
+                    }
+                }
+                return chart;
             }
-            return chart;
 
         } catch (Exception e) {
             log.error("获取图表详情缓存失败, chartId: {}", chartId, e);
