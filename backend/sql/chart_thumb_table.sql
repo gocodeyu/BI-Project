@@ -17,3 +17,5 @@ ALTER TABLE `chart`
 ADD COLUMN IF NOT EXISTS `thumbNum` int DEFAULT 0 COMMENT '点赞数';
 
 
+
+

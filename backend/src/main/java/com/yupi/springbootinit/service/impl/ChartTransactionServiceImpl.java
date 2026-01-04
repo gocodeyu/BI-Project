@@ -76,7 +76,19 @@ public class ChartTransactionServiceImpl implements ChartTransactionService {
     public void updateChartStatusAndSendMessage(Long chartId, boolean isVip) {
         log.info("[事务服务] 开始更新图表状态 - chartId={}", chartId);
         
-        // 1. 更新图表状态为等待
+        // 1. 检查当前状态，只有 FAILED 状态才能重试（幂等性保证）
+        Chart currentChart = chartService.getById(chartId);
+        if (currentChart == null) {
+            log.error("[事务服务] 图表不存在 - chartId={}", chartId);
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图表不存在");
+        }
+        String currentStatus = currentChart.getStatus();
+        if (!GenChartStatusEnum.FAILED.getValue().equals(currentStatus)) {
+            log.warn("[事务服务] 图表状态不是 FAILED，不能重试 - chartId={}, currentStatus={}", chartId, currentStatus);
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "只有失败状态的图表才能重试，当前状态：" + currentStatus);
+        }
+        
+        // 2. 更新图表状态为等待
         Chart updateChart = new Chart();
         updateChart.setId(chartId);
         updateChart.setStatus(GenChartStatusEnum.WAIT.getValue());
@@ -90,7 +102,7 @@ public class ChartTransactionServiceImpl implements ChartTransactionService {
         
         log.info("[事务服务] 图表状态更新成功 - chartId={}, status=wait", chartId);
         
-        // 2. 发送MQ消息（在事务提交后才会真正发送）
+        // 3. 发送MQ消息（在事务提交后才会真正发送）
         biMessageProducer.sendMessage(String.valueOf(chartId), isVip);
         log.info("[事务服务] MQ消息已提交（待事务提交后发送） - chartId={}, isVip={}", chartId, isVip);
     }

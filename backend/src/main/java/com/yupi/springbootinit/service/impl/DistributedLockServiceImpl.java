@@ -7,6 +7,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
@@ -26,6 +28,7 @@ public class DistributedLockServiceImpl implements DistributedLockService {
     public <T> T executeWithLock(String lockKey, long waitTime, long leaseTime, Supplier<T> supplier) throws Exception {
         RLock lock = redissonClient.getLock(lockKey);
         boolean acquired = false;
+        boolean registeredTransactionSync = false; // 标记是否注册了事务同步回调
         
         try {
             // 尝试获取锁
@@ -38,6 +41,25 @@ public class DistributedLockServiceImpl implements DistributedLockService {
             
             log.info("成功获取分布式锁: lockKey={}", lockKey);
             
+            // 如果当前有活跃事务，注册事务同步回调，在事务提交/回滚后释放锁
+            if (TransactionSynchronizationManager.isActualTransactionActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        // 事务完成（提交或回滚）后释放锁
+                        if (lock.isHeldByCurrentThread()) {
+                            lock.unlock();
+                            log.info("事务完成后释放分布式锁: lockKey={}, status={} (0=STATUS_COMMITTED, 1=STATUS_ROLLED_BACK, 2=STATUS_UNKNOWN)", 
+                                    lockKey, status);
+                        }
+                    }
+                });
+                registeredTransactionSync = true;
+                log.info("已注册事务同步回调，锁将在事务提交后释放: lockKey={}", lockKey);
+            } else {
+                log.info("当前无事务，锁将在业务逻辑执行后立即释放: lockKey={}", lockKey);
+            }
+            
             // 执行业务逻辑
             return supplier.get();
             
@@ -46,10 +68,10 @@ public class DistributedLockServiceImpl implements DistributedLockService {
             log.error("获取锁时被中断: lockKey={}", lockKey, e);
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "系统繁忙，请稍后再试");
         } finally {
-            // 释放锁（仅当当前线程持有锁时）
-            if (acquired && lock.isHeldByCurrentThread()) {
+            // 如果没有注册事务同步回调，立即释放锁；如果已注册，锁将在事务同步回调中释放
+            if (!registeredTransactionSync && acquired && lock.isHeldByCurrentThread()) {
                 lock.unlock();
-                log.info("释放分布式锁: lockKey={}", lockKey);
+                log.info("释放分布式锁（无事务）: lockKey={}", lockKey);
             }
         }
     }

@@ -105,15 +105,4 @@ public class BiMessageProducer {
             throw new RuntimeException("消息发送失败: " + e.getMessage(), e);
         }
     }
-
-    /**
-     * 简化版发送方法（不使用事务后钩子）
-     * 用于非事务场景或需要立即发送的场景
-     * 
-     * @param chartId 图表ID
-     * @param isVip 是否是 VIP 用户
-     */
-    public void sendMessageImmediate(String chartId, boolean isVip) {
-        doSendMessage(chartId, isVip);
-    }
 }

@@ -38,3 +38,5 @@ public interface ChartThumbService extends IService<ChartThumb> {
 }
 
 
+
+

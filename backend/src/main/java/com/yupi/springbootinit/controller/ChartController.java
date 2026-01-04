@@ -538,19 +538,20 @@ UPDATE chart SET is_delete = 1 WHERE id = 10086
         final List<String> validFileSuffixList = Arrays.asList("xlsx", "xls");
         ThrowUtils.throwIf(!validFileSuffixList.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀非法");
 
-        // 2.限流校验
+        //2. 先读取 Excel 为原始 List 结构
+        List<Map<Integer, String>> rawDataList = ExcelUtils.readExcel(multipartFile);
+        if(CollUtil.isEmpty(rawDataList)){
+            // 数据为空，回退限流次数
+            //redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
+        }
+
+        // 3.限流校验
         //全局频率限流：每个用户每秒只能请求 2 次
         redisLimiterManager.doRateLimit("gen_chart_freq_" + loginUser.getId());
         //每日额度限流：会员 50 次，非会员 3 次
         redisLimiterManager.doDailyLimit(loginUser.getId(), loginUser.getUserRole());
 
-        //3. 先读取 Excel 为原始 List 结构
-        List<Map<Integer, String>> rawDataList = ExcelUtils.readExcel(multipartFile);
-        if(CollUtil.isEmpty(rawDataList)){
-            // 数据为空，回退限流次数
-            redisLimiterManager.rollbackDailyLimit(loginUser.getId(), loginUser.getUserRole());
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "数据为空");
-        }
         
         // 4. 生成文件内容的唯一标识（用于防重复提交）
         // 读取文件字节内容
